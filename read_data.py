@@ -7,15 +7,6 @@ OPT_token = 1 #
 EOR_token = 2 #
 EOS_token = 3 #
 
-
-# Turn a Unicode string to plain ASCII, thanks to
-# http://stackoverflow.com/a/518232/2809427
-def unicodeToAscii(s):
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', s)
-        if unicodedata.category(c) != 'Mn'
-    )
-
 class VocPool:
     def __init__(self):
         self.word2index = {"<UNK>": 0, "<OPT>":1, "<EOR>":2, "<EOS>": 3}
