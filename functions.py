@@ -20,11 +20,6 @@ def SUBSTRACT(x1, x2):
         return (True, x1 - x2)
     return (False, None)
 
-def NEG(x1):
-    if type(x1) == float:
-        return (True, -x1)
-    return (False, None)
-
 def MULTIPLY(x1, x2):
     if type(x1) == float and type(x2) == float:
         return (True, x1 * x2)
@@ -33,11 +28,6 @@ def MULTIPLY(x1, x2):
 def DIVIDE(x1, x2):
     if type(x1) == float and type(x2) == float and x2 != 0:
         return (True, x1 / x2)
-    return (False, None)
-
-def PERCENT(x1):
-    if x1 == '%':
-        return (True, 0.01)
     return (False, None)
     
 def POWER(x1, x2):
@@ -133,7 +123,6 @@ def FLOAT2STR(x1):
         return (True, str(x1))
     return (False, None)
 
-def TIME(x1):
-    if x1 in ["seconds", "minutes", "hours", "minute", "hour"]:
-        return (True, 60.0)
-    return (False, None)
+
+def CHECK(x1):
+    pass
