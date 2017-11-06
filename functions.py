@@ -6,9 +6,9 @@ from fractions import Fraction
 locale.setlocale( locale.LC_NUMERIC, 'en_US.UTF-8' ) 
 
 ordinal = {'first':1, 'second':2, 'third':3, 'forth':4, 'fifth':5, 'sixth':6, 'seventh':7, 'eighth':8, 'ninth':9, 'tenth':10}
+argsNum = {'ADD':2, 'SUBSTRACT':2, 'MULTIPLY':2, 'DIVIDE':2, 'POWER':2, 'LOG':1, 'SQRT':1, 
+           'SIN':1, 'COS':1, 'TAN':1, 'RADIUS2DEGREE':1, 'DEGREE2RADIUS':1, 'FACTORIAL':1, 'CHOOSE':2}
 
-def ID(x):
-    return x
 
 def ADD(x1, x2):
     if type(x1) == float and type(x2) == float:
@@ -97,16 +97,19 @@ def STR2FLOAT(x1):
     try:
         return (True, locale.atof(x1))
     except: pass
+    
+    tmp = re.sub('[^0-9/%]',' ', x1)
+    
     try:
-        return (True, float(Fraction(x1)))
+        return (True, float(Fraction(tmp)))
     except: pass
     
     try:
-        return (True, float(x1.strip('%'))/100)
+        return (True, float(tmp.strip('%'))/100)
     except: pass
     
     try:
-        return (True, locale.atof(re.sub('[^0-9]',' ', x1)))
+        return (True, locale.atof(temp))
     except: pass
     
     try:
