@@ -8,6 +8,8 @@ locale.setlocale( locale.LC_NUMERIC, 'en_US.UTF-8' )
 ordinal = {'first':1, 'second':2, 'third':3, 'forth':4, 'fifth':5, 'sixth':6, 'seventh':7, 'eighth':8, 'ninth':9, 'tenth':10}
 argsNum = {'ADD':2, 'SUBSTRACT':2, 'MULTIPLY':2, 'DIVIDE':2, 'POWER':2, 'LOG':1, 'SQRT':1, 
            'SIN':1, 'COS':1, 'TAN':1, 'RADIUS2DEGREE':1, 'DEGREE2RADIUS':1, 'FACTORIAL':1, 'CHOOSE':2}
+operations_list = ['ADD', 'SUBSTRACT','MULTIPLY', 'DIVIDE', 'SQRT', 'LOG', 'POWER','RADIUS2DEGREE', 'DEGREE2RADIUS', 
+                   'COS', 'TAN', 'SIN', 'FACTORIAL', 'CHOOSE']
 
 
 def ADD(x1, x2):
@@ -32,7 +34,9 @@ def DIVIDE(x1, x2):
     
 def POWER(x1, x2):
     if type(x1) == float and type(x2) == float:
-        return (True, x1 ** x2)
+        try:
+            return (True, x1 ** x2)
+        except: pass
     return (False, None)
 
 def LOG(x1):
@@ -129,3 +133,4 @@ def FLOAT2STR(x1):
 
 def CHECK(x1):
     pass
+    
