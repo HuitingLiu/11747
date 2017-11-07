@@ -2,6 +2,7 @@ from functions import *
 import itertools
 import timeout_decorator
 import json
+import sys
 
 ROUND_DIGIT = 10
 MAX_SEQ_LEN = 10
@@ -9,6 +10,7 @@ MAX_ARG = 1e20
 PRUNE_UNK_NUMBER_STEP = 3
 PRUNE_RATIONALE_COVERAGE = 0
 CONSTANTS = [0.0, 0.01, 1000.0, 3.14, 60.0, 24.0]
+PARTITION_NUM = 6
 
 @timeout_decorator.timeout(2, use_signals=False)
 def timeWrapper(func, args):
@@ -25,10 +27,11 @@ def tokenize(text):
     return result
 
 class Corpus(object):
-    def __init__(self, dataset = 'dev'):
+    def __init__(self, partition_id = None, dataset = 'dev'):
         self.dataset = dataset
         self.data = self.readData()
         self.instructions = []
+        self.partitionID = partition_id
 
     def readData(self):
         with open('data/%s.json'%(self.dataset)) as f1, open('data/%s.tok.json'%(self.dataset)) as f2:
@@ -144,6 +147,8 @@ class Corpus(object):
 
         confident_count = 0
         for (i, record) in enumerate(self.data):
+            if i % PARTITION_NUM != self.partitionID:
+                continue
             question_toks = tokenize(record['question'])
             rationale_toks = tokenize(record['rationale'])
             correct_idx = ord(record['correct']) - ord('A')
@@ -161,15 +166,20 @@ class Corpus(object):
                 confident_count += 1
             except: pass
             print json.dumps(result)
-            print confident_count, i + 1
             #print("%d Done!" % (i))
         #return paths
 
 
 
 def main():
-    corpus = Corpus()
-    corpus.findPath(2)
+    try:
+        partition = int(sys.argv[1])
+        assert(partition < PARTITION_NUM)
+    except:
+        print("please provide partition")
+        exit(1)
+    corpus = Corpus(dataset='dev', partition_id=partition)
+    corpus.findPath(timeout=3)
     '''
     fail = []
     count = 0
