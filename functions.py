@@ -3,6 +3,8 @@ import locale
 import re
 from word2number import w2n
 from fractions import Fraction
+from scipy.special import comb
+from scipy.special import factorial
 locale.setlocale( locale.LC_NUMERIC, 'en_US.UTF-8' ) 
 
 ordinal = {'first':1, 'second':2, 'third':3, 'forth':4, 'fifth':5, 'sixth':6, 'seventh':7, 'eighth':8, 'ninth':9, 'tenth':10}
@@ -83,26 +85,23 @@ def DEGREE2RADIUS(x1):
     
 def FACTORIAL(x1):
     try:
-        return (True, math.factorial(x1))
+        return (True, factorial(x1, exact=False))
     except:
         return (False, None)
     
 def CHOOSE(x1, x2):
     try:
-        a = math.factorial(x1)
-        b = math.factorial(x2)
-        if x2 > x1:
-            return (False, None)
-        return (True, a / b / math.factorial(x1 - x2))
+        return (True, comb(x1, x2, exact=False))
     except:
         return (False, None)
 
 def STR2FLOAT(x1):
+    x1 = x1.encode('utf-8')
     try:
         return (True, locale.atof(x1))
     except: pass
     
-    tmp = re.sub('[^0-9/%]',' ', x1)
+    tmp = re.sub('[^0-9/%\.]',' ', x1)
     
     try:
         return (True, float(Fraction(tmp)))
@@ -113,7 +112,7 @@ def STR2FLOAT(x1):
     except: pass
     
     try:
-        return (True, locale.atof(temp))
+        return (True, locale.atof(tmp))
     except: pass
     
     try:
