@@ -100,12 +100,25 @@ class Corpus(object):
 
                     queue.put((step, path[:] + [(op, args, res)], all_args | set([res])))
 
+        print("Step:", step, " Qsize:", queue.qsize())
 
-        while queue.empty() != False:
+        # Cut complicate branch
+        if queue.qsize() > 64:
+            # Random Guess
+            idx = random.randint(0,len(options)-1)
+            return ["Random Guess:", options[idx]], idx
+
+        while queue.empty() == False:
             (step, cur_path, cur_args) = queue.get()
 
-            # random guess
-            if step > PRUNE_UNK_NUMBER_STEP:
+            # Cut complicate branch
+            if step > 1 and queue.qsize() > 10000:
+                # Random Guess
+                idx = random.randint(0,len(options)-1)
+                return ["Random Guess:", options[idx]], idx
+
+            # Cut complicate branch
+            if step > 2:
                 idx = random.randint(0,len(options)-1)
                 return ["Random Guess:", options[idx]], idx
 
@@ -118,7 +131,7 @@ class Corpus(object):
                         if res in options:
                             return cur_path + [(op, args, res)], options.index(res)
 
-                        queue.put((step, cur_path[:] + [(op, args, res)], cur_args | set([res])))
+                        queue.put((step + 1, cur_path[:] + [(op, args, res)], cur_args | set([res])))
 
         # Random Guess
         idx = random.randint(0,len(options)-1)
@@ -193,9 +206,9 @@ class Corpus(object):
         correct_count = 0
         total_count = 0
         for (i, record) in enumerate(self.data):
-            total_count += 1
             #if i % PARTITION_NUM != self.partitionID:
             #    continue
+            total_count += 1
             question_toks = tokenize(record['question'])
             rationale_toks = tokenize(record['rationale'])
             correct_idx = ord(record['correct']) - ord('A')
