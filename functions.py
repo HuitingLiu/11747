@@ -101,7 +101,7 @@ def STR2FLOAT(x1):
         return (True, locale.atof(x1))
     except: pass
     
-    tmp = re.sub('[^0-9/%\.]',' ', x1)
+    tmp = re.sub('[^0-9/%,e\-\.]',' ', x1)
     
     try:
         return (True, float(Fraction(tmp)))
@@ -132,4 +132,3 @@ def FLOAT2STR(x1):
 
 def CHECK(x1):
     pass
-    
