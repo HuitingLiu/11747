@@ -4,6 +4,8 @@ import timeout_decorator
 import json
 import sys
 from nltk.tokenize.stanford import StanfordTokenizer
+import random
+from Queue import Queue
 
 
 jar_path = '/Users/chenhu/Downloads/stanford-postagger-2017-06-09/stanford-postagger.jar'
@@ -70,7 +72,6 @@ class Corpus(object):
 
 
     def findPathByVal(self, question_toks, rationale_toks, ans_text, verbose = False):
-
         values = set(CONSTANTS)
         rationale_num = set()
         #print ans_text
@@ -108,6 +109,93 @@ class Corpus(object):
         else:
             return path
 
+    def solveBySearch(self, question_toks, options, search_type = 'BFS'):
+        values  = set([0.0])
+        #values = set(CONSTANTS)
+
+        for tok in question_toks:
+            ok, res = STR2FLOAT(tok)
+            if ok:
+                values.add(round(res, ROUND_DIGIT))
+
+        if search_type == 'BFS':
+            path, choice_idx, hit = self.BFSSolver([], operations_list, values, options)
+            return path, choice_idx, hit
+        else:
+            return self.DFSSolver([], operations_list, values, options, 0)
+
+    def DFSSolver(self, path, ops, all_args, options, depth):
+        if depth >= 3:
+            return None, None, False
+        for op in ops:
+            args_num = argsNum[op]
+            for args in itertools.permutations(all_args, args_num):
+                ok, res = eval(op)(*args)
+                if ok and res < MAX_ARG:
+                    res = round(res, ROUND_DIGIT)
+                    if res in options:
+                        return path, options.index(res), True
+                    elif res not in all_args:
+                        path, choice_idx, hit = self.DFSSolver(path + [(op, args, res)], ops, all_args | set([res]), options, depth + 1)
+                        if hit:
+                            return path, choice_idx, hit
+        return None, None, False
+
+
+
+
+    def BFSSolver(self, path, ops, all_args, options):
+        queue = Queue()
+        step = 0
+        for op in ops:
+            args_num = argsNum[op]
+            for args in itertools.permutations(all_args, args_num):
+                ok, res = eval(op)(*args)
+                if ok and res < MAX_ARG:
+                    res = round(res, ROUND_DIGIT)
+                    if res in options:
+                        return path + [(op, args, res)], options.index(res), True
+
+                    queue.put((step, path[:] + [(op, args, res)], all_args | set([res])))
+
+        print("Step:", step, " Qsize:", queue.qsize())
+
+        # Cut complicate branch
+        if queue.qsize() > 128:
+            # Random Guess
+            idx = random.randint(0,len(options)-1)
+            return ["Random Guess:", options[idx]], idx
+
+        while queue.empty() == False:
+            (step, cur_path, cur_args) = queue.get()
+
+            # Cut complicate branch
+            if step > 1 and queue.qsize() > 30000:
+                # Random Guess
+                idx = random.randint(0,len(options)-1)
+                return ["Random Guess:", options[idx]], idx, False
+
+            # Cut complicate branch
+            if step > 3:
+                idx = random.randint(0,len(options)-1)
+                return ["Random Guess:", options[idx]], idx, False
+
+            for op in ops:
+                args_num = argsNum[op]
+                for args in itertools.permutations(cur_args, args_num):
+                    ok, res = eval(op)(*args)
+                    if ok and res < MAX_ARG:
+                        res = round(res, ROUND_DIGIT)
+                        if res in options:
+                            return cur_path + [(op, args, res)], options.index(res), True
+
+                        queue.put((step + 1, cur_path[:] + [(op, args, res)], cur_args | set([res])))
+
+        # Random Guess
+        idx = random.randint(0,len(options)-1)
+        return ["Random Guess:", options[idx]], idx, False
+
+
     def DFS(self, path, ops, all_args, rationale, ans, optimal, unk_step):
         if len(rationale) < optimal[0]:
             optimal[1] = path
@@ -144,7 +232,6 @@ class Corpus(object):
         return None
 
     def findPathbyIdx(self, idx, verbose = False):
-
         confident = False
         for i, record in enumerate(self.data):
             if i != idx:
@@ -162,6 +249,57 @@ class Corpus(object):
                 print("Answer: %s" % (ans_text))
             path = self.findPathByVal(question_toks, rationale_toks, ans_text, verbose)
             return path, confident
+
+
+    def findAns(self, search_type = 'BFS', timeout = None):
+        if timeout is None:
+            def find_ans(question_toks, options, search_type):
+                return self.solveBySearch(question_toks, options, search_type)
+
+        correct_count = 0
+        total_count = 0
+        hit_count = 0
+        hit_correct = 0
+        for (i, record) in enumerate(self.data):
+            total_count += 1
+            question_toks = tokenize(record['question'], False)
+            rationale_toks = tokenize(record['rationale'], False)
+            correct_idx = ord(record['correct']) - ord('A')
+            ans_text = record['options'][correct_idx][2:]
+            flag, ans = STR2FLOAT(ans_text)
+
+            result = dict(record['raw'])
+
+            if flag == False:
+                choice_idx = random.randint(0, 4)
+                result['path'] = ["Random Guess for no-numeric question"]
+                result['choice'] = chr(ord('A') + choice_idx)
+                result['hit'] = False
+                if choice_idx == correct_idx:
+                    correct_count += 1
+            else:
+                options = []
+                for option in record['options']:
+                    opt_text = option[2:]
+                    flag, opt = STR2FLOAT(opt_text)
+                    options.append(opt)
+
+                try:
+                    path, choice_idx, hit = find_ans(question_toks, options, search_type)
+                    result['path'] = path
+                    result['choice'] = chr(ord('A') + choice_idx)
+                    result['hit'] = hit
+                    if hit:
+                        hit_count += 1
+
+                    if choice_idx == correct_idx:
+                        correct_count += 1
+                        if hit:
+                            hit_correct += 1
+                except: pass
+            print json.dumps(result)
+        print("Correct Count:", correct_count, " Correct Rate:", correct_count * 1.0 / total_count, " Hit Correct:", hit_correct, " Hit Total:", hit_count, " Hit Correct Rate:",hit_correct * 1.0 / hit_count)
+
 
     def findPath(self, timeout=None, verbose = False):
         # paths = []
@@ -181,11 +319,13 @@ class Corpus(object):
                 continue
             question_toks = tokenize(record['question'], False)
             rationale_toks = tokenize(record['rationale'], False)
+
             correct_idx = ord(record['correct']) - ord('A')
             ans_text = record['options'][correct_idx][2:]
             _, ans = self.parseAns(ans_text)
             confident = ans is not None
             count += 1
+
             if verbose:
                 print("Question %d: %s" % (i, record['question']))
                 print("Rationale: %s" % (record['rationale']))
@@ -212,16 +352,18 @@ def main():
         #dataset = sys.argv[3]
         partition_num = 1
         partition = 0
-        dataset = 'dev'
-        assert(dataset in ['dev', 'train'])
+        dataset = 'test'
+        assert(dataset in ['dev', 'train', 'test'])
         assert(partition < partition_num)
         assert(partition >=0)
         assert(partition_num > 0)
     except:
         print("please execute like: \n python instructions.py [partition_num] [partition] [dev | train]")
         exit(1)
+
     corpus = Corpus(dataset=dataset, partition_id=partition, partition_num= partition_num, ans_parse='tok')
-    corpus.findPath(timeout=3)
+    #corpus.findPath(timeout=3)
+    corpus.findAns(search_type='BFS')
     '''
     fail = []
     count = 0
