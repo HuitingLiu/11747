@@ -122,7 +122,12 @@ class Corpus(object):
             path, choice_idx, hit = self.BFSSolver([], operations_list, values, options)
             return path, choice_idx, hit
         else:
-            return self.DFSSolver([], operations_list, values, options, 0)
+            path, choice_idx, hit =  self.DFSSolver([], operations_list, values, options, 0)
+            if hit:
+                return path, choice_idx, hit
+            else:
+                idx = random.randint(0, len(options) - 1)
+                return ["Random Guess:", options[idx]], idx, False
 
     def DFSSolver(self, path, ops, all_args, options, depth):
         if depth >= 3:
@@ -136,9 +141,9 @@ class Corpus(object):
                     if res in options:
                         return path, options.index(res), True
                     elif res not in all_args:
-                        path, choice_idx, hit = self.DFSSolver(path + [(op, args, res)], ops, all_args | set([res]), options, depth + 1)
+                        p, choice_idx, hit = self.DFSSolver(path + [(op, args, res)], ops, all_args | set([res]), options, depth + 1)
                         if hit:
-                            return path, choice_idx, hit
+                            return p, choice_idx, hit
         return None, None, False
 
 
@@ -266,7 +271,8 @@ class Corpus(object):
             rationale_toks = tokenize(record['rationale'], False)
             correct_idx = ord(record['correct']) - ord('A')
             ans_text = record['options'][correct_idx][2:]
-            flag, ans = STR2FLOAT(ans_text)
+            #flag, ans = STR2FLOAT(ans_text)
+            flag, ans = self.parseAns(ans_text)
 
             result = dict(record['raw'])
 
@@ -281,7 +287,8 @@ class Corpus(object):
                 options = []
                 for option in record['options']:
                     opt_text = option[2:]
-                    flag, opt = STR2FLOAT(opt_text)
+                    #flag, opt = STR2FLOAT(opt_text)
+                    flag, opt = self.parseAns(opt_text)
                     options.append(opt)
 
                 try:
@@ -363,7 +370,7 @@ def main():
 
     corpus = Corpus(dataset=dataset, partition_id=partition, partition_num= partition_num, ans_parse='tok')
     #corpus.findPath(timeout=3)
-    corpus.findAns(search_type='BFS')
+    corpus.findAns(search_type='DFS')
     '''
     fail = []
     count = 0
