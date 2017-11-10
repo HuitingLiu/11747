@@ -354,7 +354,7 @@ class Corpus(object):
             except: pass
             print json.dumps(result)
             #print("%d Done!" % (i))
-        print("%d done! %d success! %d confident!" % (count, success_count, confident_count))
+        #print("%d done! %d success! %d confident!" % (count, success_count, confident_count))
         #return paths
 
 
