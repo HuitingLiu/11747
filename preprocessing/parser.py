@@ -11,6 +11,7 @@ from __future__ import print_function
 
 
 import re
+import spacy
 
 from collections import Counter
 from simpleTransform import SimpleTransform
@@ -57,6 +58,27 @@ def rewrite_number(text):
 # In[4]:
 
 
+tokenizer = spacy.load('en').tokenizer
+arrow_str = re.compile(r'(-( )*){3,}')
+doller_num = re.compile(r'($)(\d)')
+stock_num = re.compile(r'([A-z]\.)(\d)')
+num_unit = re.compile(r'(\d,\d\d\d)([A-z])')
+power_notation = re.compile(r'(\(\d+\))(\d)')
+
+def rewrite_with_tokenization(text):
+    text = power_notation.sub(r'\g<1>^\g<2>', text)
+    text = arrow_str.sub('\u2192', text)
+    text = doller_num.sub(r'\g<1> \g<2>', text)
+    text = stock_num.sub(r'\g<1> \g<2>', text)
+    text = num_unit.sub(r'\g<1> \g<2>', text)
+    text = rewrite_number(text)
+    spaced_text = ' '.join(map(str, tokenizer(text)))
+    return rewrite_number(spaced_text)
+
+
+# In[5]:
+
+
 def combinatorial_notation(tokens, local_dict, global_dict):
     beginning = [(NAME, 'binomial'), (OP, '(')]
     comma = [(OP, ',')]
@@ -72,7 +94,24 @@ def combinatorial_notation(tokens, local_dict, global_dict):
     return result
 
 
-# In[5]:
+# In[6]:
+
+
+operator_dict = {
+    '\u00f7': '/',
+    '\u00d7': '*',
+}
+def unicode_operator(tokens, local_dict, global_dict):
+    result = []
+    for toknum, tokval in tokens:
+        if tokval in operator_dict:
+            toknum = OP
+            tokval = operator_dict[tokval]
+        result.append((toknum, tokval))
+    return result
+
+
+# In[7]:
 
 
 def reject_symbols(symbols):
@@ -84,13 +123,13 @@ def reject_symbols(symbols):
     return transformation
 
 
-# In[6]:
+# In[8]:
 
 
 def get_transformations(splittable_symbols):
     def splittable(symbol):
         return set(symbol).issubset(splittable_symbols)
-    return (combinatorial_notation,) + standard_transformations + (
+    return (combinatorial_notation, unicode_operator) + standard_transformations + (
         convert_xor,
         split_symbols_custom(splittable),
         implicit_multiplication,
@@ -99,7 +138,7 @@ def get_transformations(splittable_symbols):
     )
 
 
-# In[7]:
+# In[9]:
 
 
 def all_symbols(expr):
@@ -108,7 +147,7 @@ def all_symbols(expr):
             yield str(sub_expr)
 
 
-# In[8]:
+# In[10]:
 
 
 def all_values(expr):
@@ -118,15 +157,23 @@ def all_values(expr):
             yield eval_result, len(sub_expr.args) == 0
 
 
-# In[9]:
+# In[11]:
 
 
 def parse(text, splittable_symbols=set(), local_dict={name: Symbol(name) for name in ('x', 'y', 'z', 'A', 'B', 'C')}):
-    from sympy import binomial, factorial, factorial2
+    from sympy import binomial, factorial, factorial2, Mul, Add
     local_dict['binomial'] = lambda x, y: binomial(x, y, evaluate = False)
     local_dict['factorial'] = lambda x: factorial(x, evaluate = False)
     local_dict['factorial2'] = lambda x: factorial2(x, evaluate = False)
-    expr = parse_expr(text, local_dict=local_dict, transformations=get_transformations(splittable_symbols), evaluate=False)
+    try:
+        mul_identity = Mul.identity
+        Mul.identity = None
+        add_identity = Add.identity
+        Add.identity = None
+        expr = parse_expr(text, local_dict=local_dict, transformations=get_transformations(splittable_symbols), evaluate=False)
+    finally:
+        Mul.identity = mul_identity
+        Add.identity = add_identity
     for symbol in all_symbols(expr):
         if '_' in symbol and '' not in symbol.split('_'):
             continue
@@ -137,7 +184,7 @@ def parse(text, splittable_symbols=set(), local_dict={name: Symbol(name) for nam
     return expr
 
 
-# In[10]:
+# In[12]:
 
 
 def try_parse(text, splittable_symbols=set(), local_dict=None):
@@ -149,14 +196,14 @@ def try_parse(text, splittable_symbols=set(), local_dict=None):
         return None
 
 
-# In[11]:
+# In[13]:
 
 
 def potential_expr(char):
     return char.isdigit() or char in {'+', '*', '/', '^'}
 
 
-# In[12]:
+# In[14]:
 
 
 def extract_exprs_from_line(line, splittable_symbols=set()):
@@ -192,10 +239,10 @@ def extract_exprs_from_line(line, splittable_symbols=set()):
             pos += 1
 
 
-# In[13]:
+# In[15]:
 
 
-def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile(r'(=|\n|,|>|<|\(\w\))')):
+def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile(r'(=|\n|,|>|<)')):
     base = 0
     for segment in delimiter.split(text):
         if len(segment) > 0 and delimiter.match(segment) is None:
@@ -204,21 +251,21 @@ def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile
         base += len(segment)
 
 
-# In[14]:
+# In[16]:
 
 
 def split_text_and_expr(text, splittable_symbols=set()):
     last_end = 0
     for start, end, expr in extract_exprs_from_text(text, splittable_symbols):
         if last_end != start:
-            yield last_end, start, ''
+            yield last_end, start, text[last_end:start]
         yield start, end, expr
         last_end = end
     if last_end < len(text):
-        yield last_end, len(text), ''
+        yield last_end, len(text), text[last_end:len(text)]
 
 
-# In[15]:
+# In[17]:
 
 
 def parse_rationale(text):
@@ -233,7 +280,10 @@ def parse_rationale(text):
     results = []
     for start, end, segment in split_text_and_expr(text, splittable_symbols=splittable_symbols):
         is_expr = type(segment) != str
-        results.append((is_expr, segment, text[start:end]))
+        if is_expr:
+            results.append((is_expr, segment))
+        else:
+            results.append((is_expr, list(map(lambda x:str(x).lower(), tokenizer(segment)))))
 
     return results
 
