@@ -11,3 +11,5 @@ Baseline Model: Section 6.1
 Check Point 1 Report:
 https://www.overleaf.com/11620932yrttgdvwsyhq#/43965454/
 
+Check Point 2 Report:
+https://www.overleaf.com/12115802xdswhbjffkjh#/46013450/
