@@ -4,6 +4,7 @@ import timeout_decorator
 import json
 import sys
 from nltk.tokenize.stanford import StanfordTokenizer
+from preprocessing.num_parse import rewrite_number
 import random
 from Queue import Queue
 
@@ -50,9 +51,9 @@ class Corpus(object):
             for line1, line2 in zip(f1, f2):
                 d_raw = json.loads(line1)
                 d_tok = json.loads(line2)
-                yield {'question': d_tok['question'], 'options': d_raw['options'],
-                       'rationale': d_tok['rationale'], 'correct': d_raw['correct'],
-                       'raw': d_tok}
+                yield {'question': d_raw['question'], 'options': d_raw['options'],
+                       'rationale': d_raw['rationale'], 'correct': d_raw['correct'],
+                       'raw': d_raw}
 
     def parseAns(self, ans_text):
         if self.ans_parse == 'total':
@@ -114,6 +115,12 @@ class Corpus(object):
         #values = set(CONSTANTS)
 
         for tok in question_toks:
+            if tok in ['hours', 'hour', 'minutes', 'minute', 'seconds']:
+                values.add(round(60, ROUND_DIGIT))
+            elif tok in ['circle', 'radius', 'diameter']:
+                values.add(round(3.14, ROUND_DIGIT))
+            elif tok.startswith('kilo'):
+                values.add(round(1000, ROUND_DIGIT))
             ok, res = STR2FLOAT(tok)
             if ok:
                 values.add(round(res, ROUND_DIGIT))
@@ -267,10 +274,10 @@ class Corpus(object):
         hit_correct = 0
         for (i, record) in enumerate(self.data):
             total_count += 1
-            question_toks = tokenize(record['question'], False)
-            rationale_toks = tokenize(record['rationale'], False)
+            question_toks = tokenize(rewrite_number(record['question']), True)
+            rationale_toks = tokenize(rewrite_number(record['rationale']), True)
             correct_idx = ord(record['correct']) - ord('A')
-            ans_text = record['options'][correct_idx][2:]
+            ans_text = rewrite_number(record['options'][correct_idx][2:])
             #flag, ans = STR2FLOAT(ans_text)
             flag, ans = self.parseAns(ans_text)
 
@@ -324,11 +331,11 @@ class Corpus(object):
         for (i, record) in enumerate(self.data):
             if i % self.partition_num != self.partitionID:
                 continue
-            question_toks = tokenize(record['question'], False)
-            rationale_toks = tokenize(record['rationale'], False)
+            question_toks = tokenize(rewrite_number(record['question']), True)
+            rationale_toks = tokenize(rewrite_number(record['rationale']), True)
 
             correct_idx = ord(record['correct']) - ord('A')
-            ans_text = record['options'][correct_idx][2:]
+            ans_text = rewrite_number(record['options'][correct_idx][2:])
             _, ans = self.parseAns(ans_text)
             confident = ans is not None
             count += 1
@@ -354,12 +361,12 @@ class Corpus(object):
 
 def main():
     try:
-        #partition_num = int(sys.argv[1])
-        #partition = int(sys.argv[2])
-        #dataset = sys.argv[3]
-        partition_num = 1
-        partition = 0
-        dataset = 'test'
+        partition_num = int(sys.argv[1])
+        partition = int(sys.argv[2])
+        dataset = sys.argv[3]
+        #partition_num = 1
+        #partition = 0
+        #dataset = 'dev'
         assert(dataset in ['dev', 'train', 'test'])
         assert(partition < partition_num)
         assert(partition >=0)
@@ -369,38 +376,10 @@ def main():
         exit(1)
 
     corpus = Corpus(dataset=dataset, partition_id=partition, partition_num= partition_num, ans_parse='tok')
-    #corpus.findPath(timeout=3)
-    corpus.findAns(search_type='DFS')
-    '''
-    fail = []
-    count = 0
-    confident_count = 0
-    path_total_length = 0
-    confident_path_total_length = 0
-    for i in range(len(corpus.data)):
-        try:
-            path, confident = timeWrapper(corpus.findPathbyIdx, [i, False])
-            if confident:
-                confident_count += 1
-                confident_path_total_length += len(path)
-            #print("%d success" % (i))
-            #print path
-        except:
-            path = None
-            fail.append(i)
-        if path!= None:
-            count += 1
-            path_total_length += len(path)
-        if (i+1) % 10 == 0:
-            #break
-            print("%d done! %d success! %d confident!"%(i + 1, count, confident_count))
+    corpus.findPath(timeout=3)
+    #corpus.findAns(search_type='DFS')
 
-    print("%d/%d out of %d parsed" % (confident_count, count, len(corpus.data)))
-    print path_total_length / count
-    print confident_path_total_length / confident_count
-    #'''
-    #print timeWrapper(corpus.findPathbyIdx, [9, True])
-    #corpus.findPath()
+
 
 
 if __name__ == '__main__':
