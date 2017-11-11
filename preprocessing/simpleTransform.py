@@ -347,8 +347,7 @@ class SimpleTransform(object):
 #                   print 'fraction=' , vA , dA , xA , sA
 
                 else:
-                    if ( not x in Card and  # must be written out number
-                         not x in Ord ):
+                    if ( not x in Ord ):    # must be written out number
                         break
 
                     if x in Card:           # get numerical values for two components
@@ -367,8 +366,8 @@ class SimpleTransform(object):
                     elif lA > 0:            # if cannot combine
                         break               # then stop scan if anything successfully parsed already
                     elif vA == 0:           # if nothing scanned, then recombine hyphenated parts
-                        #salt = str(n) + '-' + str(m)
-                        #lA += k
+                        salt = str(n) + '/' + str(m)
+                        lA += k
                         break               # have to stop scan
                     else:
                         break               # out of options, stop scan
