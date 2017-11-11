@@ -58,12 +58,59 @@ def rewrite_number(text):
 # In[4]:
 
 
+num_with_comma = re.compile(r'((\d+\.\d+|\d+|\?+|_+|\.+),)+\d+(\.\d+)?')
+
+def process_num_with_comma(text):
+    def islist(segment):
+        if '?' in segment or '_' in segment:
+            return True
+        parts = segment.split(',')
+        if any(map(lambda x: '.' in x, parts[:-1])):
+            return True
+        lengths = list(map(len, parts))
+        lengths[-1] = len(parts[-1].split('.')[0])
+        len_counts = Counter(lengths)
+        if any(map(lambda x: x > 3, len_counts)):
+            return True
+        if len_counts[3] == 0:
+            return True
+        if len_counts[1] > 1 or len_counts[2] > 1:
+            return True
+        for left_length, right_length in zip(lengths, lengths[1:]):
+            if left_length > right_length:
+                return True
+        if ',0' in segment:
+            return False
+        return len(parts) > 3
+    result = ''
+    rest_text = text
+    while True:
+        match = num_with_comma.search(rest_text)
+        if match is None:
+            result += rest_text
+            break
+        else:
+            start, end = match.span()
+            result += rest_text[:start]
+            segment = match.group()
+            if not islist(segment):
+                result += segment
+            else:
+                result += ' , '.join(segment.split(','))
+            rest_text = rest_text[end:]
+    return result
+
+
+# In[5]:
+
+
 tokenizer = spacy.load('en').tokenizer
 arrow_str = re.compile(r'(-( )*){3,}')
 doller_num = re.compile(r'($)(\d)')
 stock_num = re.compile(r'([A-z]\.)(\d)')
 num_unit = re.compile(r'(\d,\d\d\d)([A-z])')
 power_notation = re.compile(r'(\(\d+\))(\d)')
+hyphen_concat = re.compile(r'(- )|( -)')
 
 def rewrite_with_tokenization(text):
     text = power_notation.sub(r'\g<1>^\g<2>', text)
@@ -71,12 +118,14 @@ def rewrite_with_tokenization(text):
     text = doller_num.sub(r'\g<1> \g<2>', text)
     text = stock_num.sub(r'\g<1> \g<2>', text)
     text = num_unit.sub(r'\g<1> \g<2>', text)
+    text = hyphen_concat.sub('-', text)
+    text = process_num_with_comma(text)
     text = rewrite_number(text)
     spaced_text = ' '.join(map(str, tokenizer(text)))
     return rewrite_number(spaced_text)
 
 
-# In[5]:
+# In[6]:
 
 
 def combinatorial_notation(tokens, local_dict, global_dict):
@@ -94,7 +143,7 @@ def combinatorial_notation(tokens, local_dict, global_dict):
     return result
 
 
-# In[6]:
+# In[7]:
 
 
 operator_dict = {
@@ -111,7 +160,7 @@ def unicode_operator(tokens, local_dict, global_dict):
     return result
 
 
-# In[7]:
+# In[8]:
 
 
 def reject_symbols(symbols):
@@ -123,7 +172,7 @@ def reject_symbols(symbols):
     return transformation
 
 
-# In[8]:
+# In[9]:
 
 
 def get_transformations(splittable_symbols):
@@ -138,7 +187,7 @@ def get_transformations(splittable_symbols):
     )
 
 
-# In[9]:
+# In[10]:
 
 
 def all_symbols(expr):
@@ -147,20 +196,32 @@ def all_symbols(expr):
             yield str(sub_expr)
 
 
-# In[10]:
-
-
-def all_values(expr):
-    for sub_expr in postorder_traversal(expr):
-        eval_result = sub_expr.evalf()
-        if eval_result.is_number:
-            yield eval_result, len(sub_expr.args) == 0
-
-
 # In[11]:
 
 
-def parse(text, splittable_symbols=set(), local_dict={name: Symbol(name) for name in ('x', 'y', 'z', 'A', 'B', 'C')}):
+def all_values(expr):
+    args = expr.args
+    if len(args) >= 1:
+        yield from all_values(args[0])
+    if len(args) >= 2:
+        yield from all_values(args[1])
+    if len(args) >= 3:
+        partial_expr = expr.func(args[0], args[1])
+        for arg in args[2:]:
+            partial_eval_result = partial_expr.evalf()
+            if partial_eval_result.is_number:
+                yield partial_eval_result, partial_expr
+            yield from all_values(arg)
+            partial_expr = expr.func(partial_expr, arg)
+    eval_result = expr.evalf()
+    if eval_result.is_number:
+        yield eval_result, expr
+
+
+# In[12]:
+
+
+def parse(text, splittable_symbols=set(), local_dict={name: Symbol(name) for name in ('x', 'y', 'z', 'A', 'B', 'C', 'I')}):
     from sympy import binomial, factorial, factorial2, Mul, Add
     local_dict['binomial'] = lambda x, y: binomial(x, y, evaluate = False)
     local_dict['factorial'] = lambda x: factorial(x, evaluate = False)
@@ -184,7 +245,7 @@ def parse(text, splittable_symbols=set(), local_dict={name: Symbol(name) for nam
     return expr
 
 
-# In[12]:
+# In[13]:
 
 
 def try_parse(text, splittable_symbols=set(), local_dict=None):
@@ -196,19 +257,19 @@ def try_parse(text, splittable_symbols=set(), local_dict=None):
         return None
 
 
-# In[13]:
+# In[14]:
 
 
 def potential_expr(char):
     return char.isdigit() or char in {'+', '*', '/', '^'}
 
 
-# In[14]:
+# In[15]:
 
 
 def extract_exprs_from_line(line, splittable_symbols=set()):
     if not line:
-        return []
+        return
     pos = 0
     n = len(line)
     lower_bound = 0
@@ -239,7 +300,7 @@ def extract_exprs_from_line(line, splittable_symbols=set()):
             pos += 1
 
 
-# In[15]:
+# In[16]:
 
 
 def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile(r'(=|\n|,|>|<)')):
@@ -251,7 +312,7 @@ def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile
         base += len(segment)
 
 
-# In[16]:
+# In[17]:
 
 
 def split_text_and_expr(text, splittable_symbols=set()):
@@ -265,7 +326,7 @@ def split_text_and_expr(text, splittable_symbols=set()):
         yield last_end, len(text), text[last_end:len(text)]
 
 
-# In[17]:
+# In[18]:
 
 
 def parse_rationale(text):
@@ -286,4 +347,17 @@ def parse_rationale(text):
             results.append((is_expr, list(map(lambda x:str(x).lower(), tokenizer(segment)))))
 
     return results
+
+
+# In[19]:
+
+
+def extract_nums(text):
+    result = []
+    for is_expr, expr in parse_rationale(text):
+        if is_expr:
+            nums = list(all_values(expr))
+            for index, (num, sub_expr) in enumerate(nums):
+                result.append((num, len(sub_expr.args) == 0, index + 1 == len(nums)))
+    return result
 
