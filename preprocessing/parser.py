@@ -14,7 +14,7 @@ import re
 import spacy
 
 from collections import Counter
-from simpleTransform import SimpleTransform
+from .simpleTransform import SimpleTransform
 from sympy import postorder_traversal, Symbol
 from sympy.parsing.sympy_parser import _token_splittable
 from sympy.parsing.sympy_parser import convert_xor
@@ -208,12 +208,18 @@ def all_values(expr):
     if len(args) >= 3:
         partial_expr = expr.func(args[0], args[1])
         for arg in args[2:]:
-            partial_eval_result = partial_expr.evalf()
+            try:
+                partial_eval_result = partial_expr.evalf()
+            except:
+                break
             if partial_eval_result.is_number:
                 yield partial_eval_result, partial_expr
             yield from all_values(arg)
             partial_expr = expr.func(partial_expr, arg)
-    eval_result = expr.evalf()
+    try:
+        eval_result = expr.evalf()
+    except:
+        return
     if eval_result.is_number:
         yield eval_result, expr
 
@@ -303,7 +309,7 @@ def extract_exprs_from_line(line, splittable_symbols=set()):
 # In[16]:
 
 
-def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile(r'(=|\n|,|>|<)')):
+def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile(r'(=|\n|,|>|<|[A-z]{5,}|\$)')):
     base = 0
     for segment in delimiter.split(text):
         if len(segment) > 0 and delimiter.match(segment) is None:
@@ -356,8 +362,9 @@ def extract_nums(text):
     result = []
     for is_expr, expr in parse_rationale(text):
         if is_expr:
+            print(expr)
             nums = list(all_values(expr))
             for index, (num, sub_expr) in enumerate(nums):
-                result.append((num, len(sub_expr.args) == 0, index + 1 == len(nums)))
+                result.append((float(num), len(sub_expr.args) == 0, index + 1 == len(nums)))
     return result
 

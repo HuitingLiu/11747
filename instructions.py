@@ -3,14 +3,12 @@ import itertools
 import timeout_decorator
 import json
 import sys
-from nltk.tokenize.stanford import StanfordTokenizer
-from preprocessing.num_parse import rewrite_number
+from preprocessing.parser import extract_nums
 import random
-from Queue import Queue
+from queue import Queue
 
 
-jar_path = '/Users/chenhu/Downloads/stanford-postagger-2017-06-09/stanford-postagger.jar'
-tokenizer = StanfordTokenizer(path_to_jar=jar_path, options={'normalizeParentheses': False})
+
 ROUND_DIGIT = 10
 MAX_SEQ_LEN = 10
 MAX_ARG = 1e20
@@ -24,27 +22,13 @@ def timeWrapper(func, args):
     return func(*args)
 
 
-def tokenize(text, stanford):
-    if stanford:
-        tokens = tokenizer.tokenize(text)
-    else:
-        tokens = text.split()
-    result = []
-    for i, token in enumerate(tokens):
-        if token == '%' and i > 0:
-            result[-1] += '%'
-        else:
-            result.append(token)
-    return result
-
 class Corpus(object):
-    def __init__(self, partition_id = None, dataset = 'dev', partition_num = PARTITION_NUM, ans_parse = 'total'):
+    def __init__(self, partition_id = None, dataset = 'dev', partition_num = PARTITION_NUM):
         self.dataset = dataset
         self.data = self.readData()
         self.instructions = []
         self.partitionID = partition_id
         self.partition_num = partition_num
-        self.ans_parse = ans_parse
 
     def readData(self):
         with open('data/%s.json'%(self.dataset)) as f1, open('data/%s.tok.json'%(self.dataset)) as f2:
@@ -56,41 +40,27 @@ class Corpus(object):
                        'raw': d_raw}
 
     def parseAns(self, ans_text):
-        if self.ans_parse == 'total':
-            return STR2FLOAT(ans_text)
+        nums = extract_nums(ans_text)
+        if len(nums) == 0:
+            return (False, None)
         else:
-            ans_text = tokenize(ans_text, stanford=True)
-            res = None
-            for tok in ans_text:
-                ok, current_res = STR2FLOAT(tok)
-                if ok:
-                    if res is None:
-                        res = current_res
-                    else:
-                        res = None
-                        break
-            return (res is not None, res)
+            return (True, nums[-1][0])
 
 
-    def findPathByVal(self, question_toks, rationale_toks, ans_text, verbose = False):
+    def findPathByVal(self, question_nums, rationale_nums, ans, verbose = False):
         values = set(CONSTANTS)
         rationale_num = set()
         #print ans_text
-        ok, ans = self.parseAns(ans_text)
-        if ok:
+        if ans is not None:
             ans = round(ans, ROUND_DIGIT)
 
-        for tok in rationale_toks:
-            ok, res = STR2FLOAT(tok)
-            if ok:
-                rationale_num.add(round(res, ROUND_DIGIT))
+        for num in rationale_nums:
+            rationale_num.add(round(num, ROUND_DIGIT))
 
         values &= rationale_num
 
-        for tok in question_toks:
-            ok, res = STR2FLOAT(tok)
-            if ok:
-                values.add(round(res, ROUND_DIGIT))
+        for num in question_nums:
+            values.add(round(num, ROUND_DIGIT))
 
         rationale_num -= values
 
@@ -110,31 +80,29 @@ class Corpus(object):
         else:
             return path
 
-    def solveBySearch(self, question_toks, options, search_type = 'BFS'):
+    def solveBySearch(self, question_nums, options, search_type = 'BFS'):
         values  = set([0.0])
         #values = set(CONSTANTS)
 
-        for tok in question_toks:
-            if tok in ['hours', 'hour', 'minutes', 'minute', 'seconds']:
-                values.add(round(60, ROUND_DIGIT))
-            elif tok in ['circle', 'radius', 'diameter']:
-                values.add(round(3.14, ROUND_DIGIT))
-            elif tok.startswith('kilo'):
-                values.add(round(1000, ROUND_DIGIT))
-            ok, res = STR2FLOAT(tok)
-            if ok:
-                values.add(round(res, ROUND_DIGIT))
+        for num in question_nums:
+            values.add(round(num, ROUND_DIGIT))
+
+        for i in range(len(options)):
+            if options[i] != None:
+                options[i] = round(options[i], ROUND_DIGIT)
 
         if search_type == 'BFS':
             path, choice_idx, hit = self.BFSSolver([], operations_list, values, options)
-            return path, choice_idx, hit
+            if hit:
+                return path, choice_idx, hit
+            else:
+                return None, None, False
         else:
             path, choice_idx, hit =  self.DFSSolver([], operations_list, values, options, 0)
             if hit:
                 return path, choice_idx, hit
             else:
-                idx = random.randint(0, len(options) - 1)
-                return ["Random Guess:", options[idx]], idx, False
+                return None, None, False
 
     def DFSSolver(self, path, ops, all_args, options, depth):
         if depth >= 3:
@@ -170,7 +138,7 @@ class Corpus(object):
 
                     queue.put((step, path[:] + [(op, args, res)], all_args | set([res])))
 
-        print("Step:", step, " Qsize:", queue.qsize())
+        # print("Step:", step, " Qsize:", queue.qsize())
 
         # Cut complicate branch
         if queue.qsize() > 128:
@@ -243,25 +211,6 @@ class Corpus(object):
 
         return None
 
-    def findPathbyIdx(self, idx, verbose = False):
-        confident = False
-        for i, record in enumerate(self.data):
-            if i != idx:
-                continue
-            question_toks = tokenize(record['question'], True)
-            rationale_toks = tokenize(record['rationale'], False)
-            correct_idx = ord(record['correct']) - ord('A')
-            ans_text = record['options'][correct_idx][2:]
-            _, ans = self.parseAns(ans_text)
-            if ans is not None:
-                confident = True
-            if verbose:
-                print("Question %d: %s" % (idx, record['question']))
-                print("Rationale: %s" % (record['rationale']))
-                print("Answer: %s" % (ans_text))
-            path = self.findPathByVal(question_toks, rationale_toks, ans_text, verbose)
-            return path, confident
-
 
     def findAns(self, search_type = 'BFS', timeout = None):
         if timeout is None:
@@ -274,44 +223,42 @@ class Corpus(object):
         hit_correct = 0
         for (i, record) in enumerate(self.data):
             total_count += 1
-            question_toks = tokenize(rewrite_number(record['question']), True)
-            rationale_toks = tokenize(rewrite_number(record['rationale']), True)
+            question_nums = map(lambda x: x[0], extract_nums(record['question']))
             correct_idx = ord(record['correct']) - ord('A')
-            ans_text = rewrite_number(record['options'][correct_idx][2:])
-            #flag, ans = STR2FLOAT(ans_text)
-            flag, ans = self.parseAns(ans_text)
+
+            options = []
+            do_search = False
+            for option in record['options']:
+                opt_text = option[2:]
+                flag, opt = self.parseAns(opt_text)
+                options.append(opt)
+                if flag:
+                    do_search = True
 
             result = dict(record['raw'])
 
-            if flag == False:
+            if do_search:
+                try:
+                    path, choice_idx, hit = find_ans(question_nums, options, search_type)
+                    if hit:
+                        result['path'] = path
+                        result['choice'] = chr(ord('A') + choice_idx)
+                        result['hit'] = True
+                        hit_count += 1
+
+                        if choice_idx == correct_idx:
+                            correct_count += 1
+                            hit_correct += 1
+                except: pass
+
+            if 'hit' not in result:
                 choice_idx = random.randint(0, 4)
-                result['path'] = ["Random Guess for no-numeric question"]
                 result['choice'] = chr(ord('A') + choice_idx)
                 result['hit'] = False
                 if choice_idx == correct_idx:
                     correct_count += 1
-            else:
-                options = []
-                for option in record['options']:
-                    opt_text = option[2:]
-                    #flag, opt = STR2FLOAT(opt_text)
-                    flag, opt = self.parseAns(opt_text)
-                    options.append(opt)
+            print(json.dumps(result))
 
-                try:
-                    path, choice_idx, hit = find_ans(question_toks, options, search_type)
-                    result['path'] = path
-                    result['choice'] = chr(ord('A') + choice_idx)
-                    result['hit'] = hit
-                    if hit:
-                        hit_count += 1
-
-                    if choice_idx == correct_idx:
-                        correct_count += 1
-                        if hit:
-                            hit_correct += 1
-                except: pass
-            print json.dumps(result)
         print("Correct Count:", correct_count, " Correct Rate:", correct_count * 1.0 / total_count, " Hit Correct:", hit_correct, " Hit Total:", hit_count, " Hit Correct Rate:",hit_correct * 1.0 / hit_count)
 
 
@@ -331,11 +278,11 @@ class Corpus(object):
         for (i, record) in enumerate(self.data):
             if i % self.partition_num != self.partitionID:
                 continue
-            question_toks = tokenize(rewrite_number(record['question']), True)
-            rationale_toks = tokenize(rewrite_number(record['rationale']), True)
+            question_nums = map(lambda x : x[0],extract_nums(record['question']))
+            rationale_nums = map(lambda x: x[0],extract_nums(record['rationale']))
 
             correct_idx = ord(record['correct']) - ord('A')
-            ans_text = rewrite_number(record['options'][correct_idx][2:])
+            ans_text = record['options'][correct_idx][2:]
             _, ans = self.parseAns(ans_text)
             confident = ans is not None
             count += 1
@@ -346,13 +293,13 @@ class Corpus(object):
                 print("Answer: %s" % (ans_text))
             result = dict(record['raw'])
             try:
-                result['path'] = find_path(question_toks, rationale_toks, ans_text)
+                result['path'] = find_path(question_nums, rationale_nums, ans)
                 result['confident'] = confident
                 success_count += 1
                 if confident:
                     confident_count += 1
             except: pass
-            print json.dumps(result)
+            print(json.dumps(result))
             #print("%d Done!" % (i))
         #print("%d done! %d success! %d confident!" % (count, success_count, confident_count))
         #return paths
@@ -375,7 +322,7 @@ def main():
         print("please execute like: \n python instructions.py [partition_num] [partition] [dev | train]")
         exit(1)
 
-    corpus = Corpus(dataset=dataset, partition_id=partition, partition_num= partition_num, ans_parse='tok')
+    corpus = Corpus(dataset=dataset, partition_id=partition, partition_num= partition_num)
     corpus.findPath(timeout=3)
     #corpus.findAns(search_type='DFS')
 

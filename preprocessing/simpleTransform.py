@@ -37,7 +37,7 @@ by the ellyConfiguration module. The arrangement is awkward, but needed
 to avoid circular importing of modules.
 """
 
-import ellyChar
+from . import ellyChar
 
 N = 20       # upper limit on substring for match
 
