@@ -96,7 +96,7 @@ def CHOOSE(x1, x2):
         return (False, None)
 
 def STR2FLOAT(x1):
-    x1 = x1.encode('utf-8')
+    #x1 = x1.encode('utf-8')
     try:
         return (True, locale.atof(x1))
     except: pass

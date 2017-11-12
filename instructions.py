@@ -4,9 +4,9 @@ import timeout_decorator
 import json
 import sys
 from nltk.tokenize.stanford import StanfordTokenizer
-from preprocessing.num_parse import rewrite_number
+#from preprocessing.num_parse import rewrite_number
 import random
-from Queue import Queue
+from queue import Queue
 
 
 jar_path = '/Users/chenhu/Downloads/stanford-postagger-2017-06-09/stanford-postagger.jar'
@@ -311,7 +311,7 @@ class Corpus(object):
                         if hit:
                             hit_correct += 1
                 except: pass
-            print json.dumps(result)
+            print(json.dumps(result))
         print("Correct Count:", correct_count, " Correct Rate:", correct_count * 1.0 / total_count, " Hit Correct:", hit_correct, " Hit Total:", hit_count, " Hit Correct Rate:",hit_correct * 1.0 / hit_count)
 
 
@@ -331,11 +331,11 @@ class Corpus(object):
         for (i, record) in enumerate(self.data):
             if i % self.partition_num != self.partitionID:
                 continue
-            question_toks = tokenize(rewrite_number(record['question']), True)
-            rationale_toks = tokenize(rewrite_number(record['rationale']), True)
+            question_toks = tokenize(record['question'], True)
+            rationale_toks = tokenize(record['rationale'], True)
 
             correct_idx = ord(record['correct']) - ord('A')
-            ans_text = rewrite_number(record['options'][correct_idx][2:])
+            ans_text = record['options'][correct_idx][2:]
             _, ans = self.parseAns(ans_text)
             confident = ans is not None
             count += 1
@@ -352,21 +352,21 @@ class Corpus(object):
                 if confident:
                     confident_count += 1
             except: pass
-            print json.dumps(result)
+            print(json.dumps(result))
             #print("%d Done!" % (i))
-        #print("%d done! %d success! %d confident!" % (count, success_count, confident_count))
+        print("%d done! %d success! %d confident!" % (count, success_count, confident_count))
         #return paths
 
 
 
 def main():
     try:
-        partition_num = int(sys.argv[1])
-        partition = int(sys.argv[2])
-        dataset = sys.argv[3]
-        #partition_num = 1
-        #partition = 0
-        #dataset = 'dev'
+        #partition_num = int(sys.argv[1])
+        #partition = int(sys.argv[2])
+        #dataset = sys.argv[3]
+        partition_num = 1
+        partition = 0
+        dataset = 'dev'
         assert(dataset in ['dev', 'train', 'test'])
         assert(partition < partition_num)
         assert(partition >=0)
@@ -376,7 +376,7 @@ def main():
         exit(1)
 
     corpus = Corpus(dataset=dataset, partition_id=partition, partition_num= partition_num, ans_parse='tok')
-    corpus.findPath(timeout=3)
+    corpus.findPath(timeout=3, verbose=True)
     #corpus.findAns(search_type='DFS')
 
 
