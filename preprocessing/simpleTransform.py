@@ -288,7 +288,7 @@ class SimpleTransform(object):
 #                       print 'x=' , x , 'sA=' , sA
                     if w == 'half' or w == 'halve':
                         w = 'second'    # normalize
-                    elif not w in Ord:
+                    elif not w in Ord or inited_from_num:
                         break
                     dA = Ord[w]
                     xA = w[-2:]         # mapping to simple fraction
@@ -328,6 +328,8 @@ class SimpleTransform(object):
                 n = Card[w]             # get value of cardinal
 #               print 'cardinal n=' , n
                 x = tl[1]               # get second part of hyphenated number
+                if len(x) == 0:
+                    break
 
                 if n == 1 or x[-1] == 's':
                     if n != 1:          # interpret hyphenation as simple fraction
@@ -347,8 +349,7 @@ class SimpleTransform(object):
 #                   print 'fraction=' , vA , dA , xA , sA
 
                 else:
-                    if ( not x in Card and  # must be written out number
-                         not x in Ord ):
+                    if ( not x in Ord ):    # must be written out number
                         break
 
                     if x in Card:           # get numerical values for two components
@@ -367,8 +368,8 @@ class SimpleTransform(object):
                     elif lA > 0:            # if cannot combine
                         break               # then stop scan if anything successfully parsed already
                     elif vA == 0:           # if nothing scanned, then recombine hyphenated parts
-                        #salt = str(n) + '-' + str(m)
-                        #lA += k
+                        salt = str(n) + '/' + str(m)
+                        lA += k
                         break               # have to stop scan
                     else:
                         break               # out of options, stop scan
