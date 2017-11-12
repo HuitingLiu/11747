@@ -231,31 +231,55 @@ def all_symbols(expr):
 # In[11]:
 
 
-def all_values(expr):
-    args = expr.args
-    if len(args) >= 1:
-        yield from all_values(args[0])
-    if len(args) >= 2:
-        yield from all_values(args[1])
-    if len(args) >= 3:
-        partial_expr = expr.func(args[0], args[1])
-        for arg in args[2:]:
-            partial_eval_result = simplify(partial_expr)
-            if partial_eval_result.is_number:
-                yield partial_eval_result.evalf(), partial_expr
-            yield from all_values(arg)
-            partial_expr = expr.func(partial_expr, arg)
-    eval_result = simplify(expr)
-    if eval_result.is_number:
-        yield eval_result.evalf(), expr
+def contains_symbol(expr):
+    exprs_with_symbol = set()
+    def contains(expr):
+        expr_id = id(expr)
+        return expr_id in exprs_with_symbol
+    for sub_expr in enumerate(postorder_traversal(expr)):
+        if hasattr(sub_expr, 'is_symbol') and sub_expr.is_symbol or (hasattr(sub_expr, 'args') and any(map(lambda x:contains(x), sub_expr.args))):
+            exprs_with_symbol.add(id(sub_expr))
+    return contains
 
 
 # In[12]:
 
 
+def all_values(expr):
+    
+    has_symbol = contains_symbol(expr)
+    
+    def traversal(expr):
+        args = expr.args
+        if len(args) >= 1:
+            yield from traversal(args[0])
+        if len(args) >= 2:
+            yield from traversal(args[1])
+        if len(args) >= 3:
+            partial_expr = expr.func(args[0], args[1])
+            for arg in args[2:]:
+                if has_symbol(partial_expr):
+                    break
+                partial_eval_result = partial_expr.evalf()
+                if partial_eval_result.is_number:
+                    yield partial_eval_result, partial_expr
+                yield from traversal(arg)
+                partial_expr = expr.func(partial_expr, arg)
+        if has_symbol(expr):
+            return
+        eval_result = expr.evalf()
+        if eval_result.is_number:
+            yield eval_result, expr
+    
+    yield from traversal(expr)
+
+
+# In[13]:
+
+
 def genereate_local_dict():
     from sympy import binomial, factorial, factorial2, Mul, Add, Integer, Pow, Float, Symbol, sin, cos, tan, log, sqrt, pi
-    local_dict = {name: Symbol(name) for name in ('x', 'y', 'z', 'A', 'B', 'C', 'I')}
+    local_dict = {name: Symbol(name) for name in ('x', 'y', 'z', 'A', 'B', 'C', 'I', 'S', 'i', 's')}
     local_dict['binomial'] = lambda x, y: binomial(x, y, evaluate = False)
     local_dict['factorial'] = lambda x: factorial(x, evaluate = False)
     local_dict['factorial2'] = lambda x: factorial2(x, evaluate = False)
@@ -276,24 +300,18 @@ def genereate_local_dict():
     return local_dict
 
 
-# In[13]:
-
-
-type((1,)) in (tuple, )
-
-
 # In[14]:
 
 
 def parse(text, splittable_symbols=set(), local_dict=genereate_local_dict()):
     from sympy.core.assumptions import ManagedProperties
-    from sympy.core.function import FunctionClass
+    from sympy.core.function import FunctionClass, UndefinedFunction
     from sympy import Tuple
     from types import FunctionType, MethodType
     from sympy.logic.boolalg import BooleanTrue, BooleanFalse
     text = ' '.join(operator_splitor.split(text))
-    expr = parse_expr(text, local_dict=local_dict, global_dict={},transformations=get_transformations(splittable_symbols), evaluate=False)
-    if any(map(lambda x: type(x) in (BooleanTrue, BooleanFalse, ManagedProperties, FunctionClass, FunctionType, MethodType, Tuple, tuple, float, int, str, bool), postorder_traversal(expr))):
+    expr = parse_expr(text, local_dict=local_dict, global_dict={}, transformations=get_transformations(splittable_symbols), evaluate=False)
+    if any(map(lambda x: type(x) in (BooleanTrue, BooleanFalse, ManagedProperties, FunctionClass, FunctionType, MethodType, Tuple, tuple, float, int, str, bool) or type(type(x)) in (UndefinedFunction, ), postorder_traversal(expr))):
         raise NameError()
     for symbol in all_symbols(expr):
         if '_' in symbol and '' not in symbol.split('_'):

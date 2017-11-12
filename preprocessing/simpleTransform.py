@@ -328,6 +328,8 @@ class SimpleTransform(object):
                 n = Card[w]             # get value of cardinal
 #               print 'cardinal n=' , n
                 x = tl[1]               # get second part of hyphenated number
+                if len(x) == 0:
+                    break
 
                 if n == 1 or x[-1] == 's':
                     if n != 1:          # interpret hyphenation as simple fraction
