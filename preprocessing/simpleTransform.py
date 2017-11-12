@@ -288,7 +288,7 @@ class SimpleTransform(object):
 #                       print 'x=' , x , 'sA=' , sA
                     if w == 'half' or w == 'halve':
                         w = 'second'    # normalize
-                    elif not w in Ord:
+                    elif not w in Ord or inited_from_num:
                         break
                     dA = Ord[w]
                     xA = w[-2:]         # mapping to simple fraction
