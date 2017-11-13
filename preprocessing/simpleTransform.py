@@ -430,6 +430,7 @@ if __name__ == '__main__':
         u'one hundred sixteen' ,
         u'three hundred thousand' ,
         u'three hundred thousand one hundred ninety-nine' ,
+        u'ninety' ,
         u'twelve hundred four' ,
         u'forty-sixty' ,
         u'sixty-six hundred' ,

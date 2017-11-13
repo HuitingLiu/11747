@@ -1,13 +1,13 @@
 
 # coding: utf-8
 
-# In[1]:
+# In[ ]:
 
 
 from __future__ import print_function
 
 
-# In[2]:
+# In[ ]:
 
 
 import copy
@@ -17,6 +17,7 @@ import spacy
 from collections import Counter
 from simpleTransform import SimpleTransform
 from sympy import postorder_traversal, simplify
+from sympy.abc import x
 from sympy.parsing.sympy_parser import _token_splittable
 from sympy.parsing.sympy_parser import convert_xor
 from sympy.parsing.sympy_parser import factorial_notation
@@ -33,30 +34,36 @@ from sympy.parsing.sympy_tokenize import OP
 from sympy.parsing.sympy_tokenize import STRING
 
 
-# In[3]:
+# In[ ]:
 
 
+num_pattern = re.compile(r'[^\W\d_]+|\d+|\W|_+')
 def rewrite_number(text):
+    pos_list = [0]
+    for token in num_pattern.findall(text):
+        if token.isspace():
+            pos_list[-1] += len(token)
+        else:
+            pos_list.append(pos_list[-1] + len(token))
+    pos_set = set(pos_list)
+
     se = SimpleTransform()
     start = 0
     n = len(text)
     result = ''
     while start < n:
-        matched, num_str = se.rewriteNumber(list(text[start:]))
-        if matched > 0:
-            start += matched
-            result += num_str
-        else:
-            while start < n and not text[start].isspace():
-                result += text[start]
-                start += 1
-            if start < n:
-                result += text[start]
-            start += 1
+        if start in pos_set:
+            matched, num_str = se.rewriteNumber(list(text[start:]))
+            if matched > 0:
+                start += matched
+                result += num_str
+                continue
+        result += text[start]
+        start += 1
     return result
 
 
-# In[4]:
+# In[ ]:
 
 
 num_with_comma = re.compile(r'((\d+\.\d+|\d+|\?+|_+|\.+),)+\d+(\.\d+)?')
@@ -102,14 +109,14 @@ def process_num_with_comma(text):
     return result
 
 
-# In[5]:
+# In[ ]:
 
 
 tokenizer = spacy.load('en').tokenizer
 arrow_str = re.compile(r'(-( )*){3,}')
 doller_num = re.compile(r'($)(\d)')
-stock_num = re.compile(r'([A-z]\.)(\d)')
-num_unit = re.compile(r'(\d,\d\d\d)([A-z])')
+stock_num = re.compile(r'([A-Za-z]\.)(\d)')
+num_unit = re.compile(r'(\d,\d\d\d)([A-Za-z])')
 power_notation = re.compile(r'(\(\d+\))(\d)')
 hyphen_concat = re.compile(r' ?- ?')
 
@@ -128,7 +135,7 @@ def rewrite_with_tokenization(text):
     return rewrite_number(spaced_text)
 
 
-# In[6]:
+# In[ ]:
 
 
 def combinatorial_notation(tokens, local_dict, global_dict):
@@ -146,7 +153,7 @@ def combinatorial_notation(tokens, local_dict, global_dict):
     return result
 
 
-# In[7]:
+# In[ ]:
 
 
 operator_dict = {
@@ -181,7 +188,7 @@ operator_dict = {
     '{': [(OP, '(')],
     '}': [(OP, ')')],
 }
-operator_splitor = re.compile('(%s)' % '|'.join(operator_dict.keys()))
+operator_splitter = re.compile('(%s)' % '|'.join(operator_dict.keys()))
 def unicode_operator(tokens, local_dict, global_dict):
     result = []
     for toknum, tokval in tokens:
@@ -192,7 +199,7 @@ def unicode_operator(tokens, local_dict, global_dict):
     return result
 
 
-# In[8]:
+# In[ ]:
 
 
 def reject_symbols(symbols):
@@ -204,7 +211,7 @@ def reject_symbols(symbols):
     return transformation
 
 
-# In[9]:
+# In[ ]:
 
 
 def get_transformations(splittable_symbols):
@@ -219,7 +226,7 @@ def get_transformations(splittable_symbols):
     )
 
 
-# In[10]:
+# In[ ]:
 
 
 def all_symbols(expr):
@@ -228,21 +235,31 @@ def all_symbols(expr):
             yield str(sub_expr)
 
 
-# In[11]:
+# In[ ]:
 
 
-def contains_symbol(expr):
+def contains_symbol(full_expr):
     exprs_with_symbol = set()
+
     def contains(expr):
         expr_id = id(expr)
         return expr_id in exprs_with_symbol
-    for sub_expr in enumerate(postorder_traversal(expr)):
-        if hasattr(sub_expr, 'is_symbol') and sub_expr.is_symbol or (hasattr(sub_expr, 'args') and any(map(lambda x:contains(x), sub_expr.args))):
-            exprs_with_symbol.add(id(sub_expr))
+
+    def traversal(expr):
+        args = expr.args
+        has_symbol = hasattr(expr, 'is_symbol') and expr.is_symbol
+        for arg in args:
+            has_symbol |= traversal(arg)
+        if has_symbol:
+            exprs_with_symbol.add(id(expr))
+        return has_symbol
+
+    traversal(full_expr)
+
     return contains
 
 
-# In[12]:
+# In[ ]:
 
 
 def all_values(expr):
@@ -274,7 +291,49 @@ def all_values(expr):
     yield from traversal(expr)
 
 
-# In[13]:
+# In[ ]:
+
+
+def all_instructions(expr):
+
+    def traversal(expr):
+        instruction = (type(expr).__name__.lower(), )
+        args = expr.args
+
+        if len(args) == 0:
+            yield ('load', expr)
+            return
+        if len(args) >= 1:
+            yield from traversal(args[0])
+        if len(args) >= 2:
+            yield from traversal(args[1])
+        if len(args) >= 3:
+            for arg in args[2:]:
+                yield instruction
+                yield from traversal(arg)
+        yield instruction
+    
+    yield from traversal(expr)
+    yield ('end', simplify(expr))
+
+
+# In[ ]:
+
+
+def to_instructions(expr):
+    has_symbol = contains_symbol(expr)
+    
+    def traversal(expr):
+        if not has_symbol(expr):
+            yield from all_instructions(expr)
+            return
+        for arg in expr.args:
+            yield from traversal(arg)
+    
+    yield from traversal(expr)
+
+
+# In[ ]:
 
 
 def genereate_local_dict():
@@ -300,7 +359,7 @@ def genereate_local_dict():
     return local_dict
 
 
-# In[14]:
+# In[ ]:
 
 
 def parse(text, splittable_symbols=set(), local_dict=genereate_local_dict()):
@@ -309,7 +368,7 @@ def parse(text, splittable_symbols=set(), local_dict=genereate_local_dict()):
     from sympy import Tuple
     from types import FunctionType, MethodType
     from sympy.logic.boolalg import BooleanTrue, BooleanFalse
-    text = ' '.join(operator_splitor.split(text))
+    text = ' '.join(operator_splitter.split(text))
     expr = parse_expr(text, local_dict=local_dict, global_dict={}, transformations=get_transformations(splittable_symbols), evaluate=False)
     if any(map(lambda x: type(x) in (BooleanTrue, BooleanFalse, ManagedProperties, FunctionClass, FunctionType, MethodType, Tuple, tuple, float, int, str, bool) or type(type(x)) in (UndefinedFunction, ), postorder_traversal(expr))):
         raise NameError()
@@ -323,7 +382,7 @@ def parse(text, splittable_symbols=set(), local_dict=genereate_local_dict()):
     return expr
 
 
-# In[15]:
+# In[ ]:
 
 
 def try_parse(text, splittable_symbols=set(), local_dict=None):
@@ -335,7 +394,7 @@ def try_parse(text, splittable_symbols=set(), local_dict=None):
         return None
 
 
-# In[16]:
+# In[ ]:
 
 
 token_pattern = re.compile(r'[^\W\d_]+|\d+|\W|_+')
@@ -374,7 +433,7 @@ def extract_exprs_from_line(line, splittable_symbols=set()):
             pos_index += 1
 
 
-# In[17]:
+# In[ ]:
 
 
 def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile(r'(=|\n|,|>|<|~|\$)')):
@@ -386,7 +445,7 @@ def extract_exprs_from_text(text, splittable_symbols=set(), delimiter=re.compile
         base += len(segment)
 
 
-# In[18]:
+# In[ ]:
 
 
 def split_text_and_expr(text, splittable_symbols=set()):
@@ -400,7 +459,7 @@ def split_text_and_expr(text, splittable_symbols=set()):
         yield last_end, len(text), text[last_end:len(text)]
 
 
-# In[19]:
+# In[ ]:
 
 
 def parse_rationale(text):
@@ -424,7 +483,7 @@ def parse_rationale(text):
     return results
 
 
-# In[20]:
+# In[ ]:
 
 
 def extract_nums(text):
@@ -435,4 +494,72 @@ def extract_nums(text):
             for index, (num, sub_expr) in enumerate(nums):
                 result.append((num, len(sub_expr.args) == 0, index + 1 == len(nums)))
     return result
+
+
+# In[ ]:
+
+
+def extract_instructions(text):
+    result = []
+    for is_expr, expr in parse_rationale(text):
+        if is_expr:
+            result += list(to_instructions(expr))
+    return result
+
+
+# In[ ]:
+
+
+math_splitter = re.compile(r'([^A-Za-z0-9._])')
+text_splitter = re.compile(r"([^A-Za-z0-9'])")
+def parse_question(text):
+    text = rewrite_with_tokenization(text)
+    symbols = set()
+    for start, end, segment in split_text_and_expr(text):
+        is_expr = type(segment) != str
+        if is_expr:
+            symbols |= set(all_symbols(segment))
+    splittable_symbols = {symbol for symbol in symbols if len(symbol) == 1}
+    #print(splittable_symbols)
+
+    result = []
+    for start, end, segment in split_text_and_expr(text, splittable_symbols=splittable_symbols):
+        is_expr = type(segment) != str
+        segment = text[start:end]
+        if is_expr:
+            for token in math_splitter.split(segment):
+                result.append(token)
+        else:
+            for token in tokenizer(segment):
+                for word in text_splitter.split(str(token)):
+                    result.append(word)
+            
+    result = [x.strip() for x in result]
+    result = [x.lower() for x in result if x]
+    return result
+
+
+# In[ ]:
+
+
+import sys
+import json
+
+
+# In[ ]:
+
+
+with open('data/train.json') as f:
+    for (i, line) in enumerate(f):
+        d = json.loads(line)
+        if i < 33432:
+            continue
+        break
+        if i % 20 == 0 or True:
+            print(i)
+        d = json.loads(line)
+        parse_question(d['question'])
+        for option in d['options']:
+            parse_question(option)
+        extract_instructions(d['rationale'])
 
