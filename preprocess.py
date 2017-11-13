@@ -11,7 +11,7 @@ def preprocess(i, d):
     for option in d['options']:
         opts.append(parse_question(option))
     instructions = extract_instructions(d['rationale'])
-    with open('dump/%d.dmp' % (i), 'wb') as writer:
+    with open('dump0/%d.dmp' % (i), 'wb') as writer:
         pickle.dump(tuple([question, opts, instructions]), writer)
     # with open('%d.dmp' % (i), 'rb') as reader:
     #    data = pickle.load(reader)
@@ -34,7 +34,7 @@ def combineDumps(begin, end):
     all_data = []
     for i in range(begin, end):
         try:
-            with open('dump/%d.dmp' % (i), 'rb') as reader:
+            with open('dump0/%d.dmp' % (i), 'rb') as reader:
                 all_data.append(pickle.load(reader))
         except: pass
     with open('data/train.preprocess%d_%d.dmp' % (begin, end), 'wb') as writer:
@@ -100,7 +100,7 @@ def addSymbolicInstructions(filename):
         opts = data[1]
         instructions = data[2]
 
-        #print(question)
+        print(question)
         #print(opts)
         print(instructions)
 
@@ -111,16 +111,10 @@ def addSymbolicInstructions(filename):
         n_all_data.append((question, opts, n_instructions))
 
         print(n_instructions)
-        if n_instructions == []:
-            print("======", i, instructions)
+
 
     with open(filename + '.symb', 'wb') as writer:
         pickle.dump(n_all_data, writer)
-
-
-
-
-
 
 
 
