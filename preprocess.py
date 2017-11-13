@@ -70,6 +70,16 @@ def query_index(val, query_idx):
             return idx_list
     return []
 
+def query_voc(val, voc):
+    try:
+        num = float(val)
+    except:
+        num = UNK
+    if num in voc:
+        return voc[num]
+    else:
+        return voc[UNK]
+
 
 def symbolicInstructions(instructions, input_num_index, num2id):
     mem = []
@@ -83,11 +93,8 @@ def symbolicInstructions(instructions, input_num_index, num2id):
         elif op == 'load':
             val = instr[1]
             n_instr = ['load']
-            num = float(val)
-            if num in num2id:
-                n_instr.append(num2id[num])
-            else:
-                n_instr.append(num2id[UNK])
+            n_instr.append(val, num2id)
+            n_instr.append(-val, num2id)
             n_instr.append(query_index(val, input_num_index))
             n_instr.append(query_index(-val, input_num_index))
             mem_symbols_pos = []
@@ -170,7 +177,10 @@ def load_nums(filename):
             op = instruction[0]
             if op == 'load':
                 value = instruction[1]
-                nums.add(float(value))
+                try:
+                    nums.add(float(value))
+                except:
+                    print(value)
         for num in nums:
             yield num
 
@@ -212,7 +222,7 @@ def main():
     parser.add_argument('--begin', default=0, type=int)
     parser.add_argument('--end', default=100, type=int)
     parser.add_argument('--unk_threshold', default=2, type=int)
-    parser.add_argument('--unk_num_threshold', default=500, type=int)
+    parser.add_argument('--unk_num_threshold', default=20, type=int)
     parser.add_argument('--save_to', default='./vocab.dmp', type=str)
     args, _ = parser.parse_known_args()
 
