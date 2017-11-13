@@ -93,8 +93,8 @@ def symbolicInstructions(instructions, input_num_index, num2id):
         elif op == 'load':
             val = instr[1]
             n_instr = ['load']
-            n_instr.append(val, num2id)
-            n_instr.append(-val, num2id)
+            n_instr.append(query_voc(val, num2id))
+            n_instr.append(query_voc(-val, num2id))
             n_instr.append(query_index(val, input_num_index))
             n_instr.append(query_index(-val, input_num_index))
             mem_symbols_pos = []
