@@ -15,7 +15,6 @@ import re
 import spacy
 
 from collections import Counter
-from nltk.tokenize import wordpunct_tokenize
 from simpleTransform import SimpleTransform
 from sympy import postorder_traversal, simplify
 from sympy.abc import x
@@ -506,12 +505,6 @@ def extract_instructions(text):
         if is_expr:
             result += list(to_instructions(expr))
     return result
-
-
-# In[ ]:
-
-
-wordpunct_tokenize('If |z_z|/w = 3')
 
 
 # In[ ]:
