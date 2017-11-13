@@ -274,10 +274,12 @@ class SimpleTransform(object):
 #                   print 'rewriteNumber w=' , w.encode('utf8')
                     try:
                         vA = int(w)     # expect integer value here
+                        salt = w
                         inited_from_num = True
                     except ValueError:
                         try:                # otherwise, try float
                             vA = float(w)   # expect integer value here
+                            salt = w
                             inited_from_num = True
                         except ValueError:
                             break           # otherwise, stop on failure to interpret
