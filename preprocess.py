@@ -16,14 +16,36 @@ def preprocess(i, d):
     #    data = pickle.load(reader)
 
 
-with open("data/train.json", 'r') as f:
-    for i, line in enumerate(f):
-        if i != 0:
-            continue
-        d = json.loads(line)
+def generateSeparateDumps():
+    with open("data/train.json", 'r') as f:
+        for i, line in enumerate(f):
+            #if i == 100:
+            #    break
+            d = json.loads(line)
+            try:
+                preprocess(i, d)
+            except:
+                print("skip %d" % (i))
+            if (i + 1) % 10 == 0:
+                print("%d Complete!" % (i + 1))
+
+def combineDumps(begin, end):
+    all_data = []
+    for i in range(begin, end):
         try:
-            preprocess(i, d)
+            with open('dump/%d.dmp' % (i), 'rb') as reader:
+                all_data.append(pickle.load(reader))
         except: pass
+    with open('data/train.preprocess%d_%d.dmp' % (begin, end), 'wb') as writer:
+        pickle.dump(all_data, writer)
+
+
+#generateSeparateDumps()
+combineDumps(0, 100)
+
+
+
+
 
 
 
