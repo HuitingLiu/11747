@@ -19,8 +19,6 @@ def preprocess(i, d, directory):
     instructions = extract_instructions(d['rationale'])
     with open(os.path.join(directory ,'%d.dmp' % (i)), 'wb') as writer:
         pickle.dump(tuple([question, opts, instructions]), writer)
-    # with open('%d.dmp' % (i), 'rb') as reader:
-    #    data = pickle.load(reader)
 
 
 def generateSeparateDumps(directory, dataset, begin, end):
@@ -97,7 +95,7 @@ def symbolicInstructions(instructions, input_num_index, num2id):
             for k, symb in mem:
                 if k == val:
                     mem_symbols_pos.append(symb)
-                elif k == -val:
+                if k == -val:
                     mem_symbols_neg.append(symb)
             n_instr.append(mem_symbols_pos)
             n_instr.append(mem_symbols_neg)
@@ -114,24 +112,27 @@ def addSymbolicInstructions(args, num2id):
         all_data = pickle.load(reader)
     n_all_data = []
     for i, data in enumerate(all_data):
-        #if i != 0:
+        #if i != 2:
         #    continue
         question = data[0]
         opts = data[1]
         instructions = data[2]
 
-        #print(question)
-        #print(opts)
-        print(instructions)
-
         input_num_index = build_index(question, opts)
-
         n_instructions = symbolicInstructions(instructions, input_num_index, num2id)
-
         n_all_data.append((question, opts, n_instructions))
 
-        print(n_instructions)
+        if (i + 1) % 100 == 0:
+            print("%d Complete!" % (i + 1))
 
+        #if i == 2:
+        #    print(question)
+        #    print(opts)
+        #    for (a, b) in zip(instructions, n_instructions):
+        #        print(a)
+        #        print(b)
+            #print(instructions)
+            #print(n_instructions)
 
     with open(filename + '.symb', 'wb') as writer:
         pickle.dump(n_all_data, writer)
@@ -215,22 +216,31 @@ def main():
     parser.add_argument('--save_to', default='./vocab.dmp', type=str)
     args, _ = parser.parse_known_args()
 
-    #generateSeparateDumps(args.dump_dir, args.dataset, args.begin, args.end,)
-    #combineDumps(args.dump_dir, args.dataset, args.begin, args.end)
+    print("Generating Separate Tokenized and Instruction Sequences...")
+    generateSeparateDumps(args.dump_dir, args.dataset, args.begin, args.end)
+    print("Combining files...")
+    combineDumps(args.dump_dir, args.dataset, args.begin, args.end)
 
-
+    print("Building Word Vocabulary...")
     word2id, id2word = build_word_vocab(args)
+    print("Word Vocabulary Size: %d" % (len(word2id)))
+    print("Building Num Vocabulary...")
     num2id, id2num = build_num_vocab(args)
+    print("Num Vocabulary Size: %d" % (len(num2id)))
+    print("Building Operation List...")
     ops_list = build_ops_list(args)
 
+    print("Dumping to Disk...")
+    with open(args.save_to, 'wb') as writer:
+        pickle.dump((ops_list, word2id, id2word, num2id, id2num), writer)
+
+    print("Generating Symbol Instruction Sequences...")
     addSymbolicInstructions(args, num2id)
 
-    with open(args.save_to, 'wb') as writer:
-        pickle.dump((ops_list,word2id, id2word, num2id, id2num), writer)
 
-    print(ops_list)
-    print(word2id)
-    print(num2id)
+    #print(ops_list)
+    #print(word2id)
+    #print(num2id)
 
 
 
