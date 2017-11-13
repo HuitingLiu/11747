@@ -15,7 +15,7 @@ import re
 import spacy
 
 from collections import Counter
-from simpleTransform import SimpleTransform
+from .simpleTransform import SimpleTransform
 from sympy import postorder_traversal, simplify
 from sympy.abc import x
 from sympy.parsing.sympy_parser import _token_splittable
