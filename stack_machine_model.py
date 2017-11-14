@@ -233,8 +233,8 @@ class Decoder(object):
         cal_input_scores, _, _ = self.input_att([es[index] for index in input_num_indexes])
         exprs_num_indexs = []
         cal_exprs_scores, _, append_expr = self.exprs_att()
-        #s = [self.opLSTM.initial_state()]
-        s = [self.opLSTM.initial_state().set_s([e, dy.tanh(e)])]
+        s = [self.opLSTM.initial_state()]
+        #s = [self.opLSTM.initial_state().set_s([e, dy.tanh(e)])]
         setp = [-1]
 
         def op_probs():
@@ -306,7 +306,8 @@ class Decoder(object):
                     exprs_num_indexs.append(setp)
                 setp[0] += 1
 
-            next_state(start_op)
+            #next_state(start_op)
+            s[0] = s[0].add_input(dy.concatenate([e, start_op, dummy_arg]))
             setp[0] = 0
 
         return op_probs, op_prob, copy_probs, from_prior_probs, from_prior_prob, from_input_probs, \
