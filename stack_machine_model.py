@@ -1,0 +1,444 @@
+# coding: utf-8
+
+import dynet_config
+dynet_config.set(mem='8000', autobatch=1)
+
+import dynet as dy
+import numpy as np
+import argparse
+import pickle
+import itertools
+import random
+import math
+import os
+
+from contextlib import contextmanager
+from sympy.parsing.sympy_parser import parse_expr
+
+UNK = ('<UNK>',)
+
+
+@contextmanager
+def parameters(*params):
+    yield tuple(map(lambda x: dy.parameter(x), params))
+
+
+class Embedder(object):
+    def __init__(self, model, obj2id, embed_dim):
+        assert min(obj2id.values()) >= 0, 'Cannot embed negative id'
+
+        model = self.model = model.add_subcollection(self.__class__.__name__)
+        self.spec = obj2id, embed_dim
+
+        vocab_size = max(obj2id.values()) + 1
+        self.embeds = model.add_lookup_parameters((vocab_size, embed_dim))
+        self.obj2id = obj2id
+
+    @classmethod
+    def from_spec(cls, spec, model):
+        obj2id, embed_dim = spec
+        return cls(model, obj2id, embed_dim)
+
+    def param_collection(self):
+        return self.model
+
+    def __getitem__(self, key):
+        i = key
+        if type(key) != int:
+            i = self.obj2id[key if key in self.obj2id else UNK]
+        return self.embeds[i]
+
+    def __call__(self, seq):
+        return [self[x] for x in seq]
+
+
+class Linear(object):
+    def __init__(self, model, input_dim, output_dim):
+        model = self.model = model.add_subcollection(self.__class__.__name__)
+        self.spec = input_dim, output_dim
+
+        self.W = model.add_parameters((output_dim, input_dim))
+        self.b = model.add_parameters(output_dim)
+
+    @classmethod
+    def from_spec(cls, spec, model):
+        input_dim, output_dim = spec
+        return cls(model, input_dim, output_dim)
+
+    def param_collection(self):
+        return self.model
+
+    def __call__(self, input_expr):
+        with parameters(self.W, self.b) as (W, b):
+            return dy.affine_transform([b, W, input_expr])
+
+
+class Encoder(object):
+    def __init__(self, model, word2wid, word_embed_dim, num_layers, hidden_dim):
+        assert hidden_dim % 2 == 0, "BiLSTM hidden dimension must be even."
+
+        self.word2wid = word2wid
+        self.words_embeds = Embedder(model, word2wid, word_embed_dim)
+
+        model = self.model = model.add_subcollection(self.__class__.__name__)
+        self.spec = word2wid, word_embed_dim, num_layers, hidden_dim
+
+        self.fwdLSTM = dy.LSTMBuilder(num_layers, word_embed_dim, hidden_dim / 2, model)
+        self.bwdLSTM = dy.LSTMBuilder(num_layers, word_embed_dim, hidden_dim / 2, model)
+
+    @classmethod
+    def from_spec(cls, spec, model):
+        word2wid, word_embed_dim, num_layers, hidden_dim = spec
+        return cls(model, word2wid, word_embed_dim, num_layers, hidden_dim)
+
+    def param_collection(self):
+        return self.model
+
+    def set_dropout(self, p):
+        self.fwdLSTM.set_dropout(p)
+        self.bwdLSTM.set_dropout(p)
+
+    def disable_dropout(self):
+        self.fwdLSTM.disable_dropout()
+        self.bwdLSTM.disable_dropout()
+
+    def __call__(self, question, options):
+        q_seq = self.words_embeds(question)
+
+        fqs = self.fwdLSTM.initial_state().add_inputs(q_seq)
+        bqs = self.bwdLSTM.initial_state().add_inputs(reversed(q_seq))
+        es = [dy.concatenate([f.output(), b.output()]) for f, b in zip(fqs, reversed(bqs))]
+
+        e = dy.concatenate([fqs[-1].output(), bqs[-1].output()])
+
+        for option in options:
+            o_seq = self.words_embeds(option)
+            fos = fqs[-1].transduce(o_seq)
+            bos = bqs[-1].transduce(reversed(o_seq))
+            es.extend(dy.concatenate([f, b]) for f, b in zip(fos, reversed(bos)))
+
+        return es, e
+
+
+class Attender(object):
+    def __init__(self, model, query_dim, content_dim, att_dim):
+        model = self.model = model.add_subcollection(self.__class__.__name__)
+        self.spec = query_dim, content_dim, att_dim
+
+        self.P = model.add_parameters((att_dim, content_dim))
+        self.W = model.add_parameters((att_dim, query_dim))
+        self.b = model.add_parameters((1, att_dim))
+
+    @classmethod
+    def from_spec(cls, spec, model):
+        query_dim, content_dim, att_dim = spec
+        return cls(model, query_dim, content_dim, att_dim)
+
+    def param_collection(self):
+        return self.model
+
+    def __call__(self, es=None):
+        with parameters(self.P, self.W, self.b) as (P, W, b):
+            if es:
+                es_matrix = dy.concatenate_cols(es)
+                ps_matrix = P * es_matrix
+
+                def cal_scores(s):
+                    hs_matrix = dy.tanh(dy.colwise_add(ps_matrix, W * s))
+                    return dy.softmax(dy.transpose(b * hs_matrix))
+
+                def cal_context(s):
+                    ws = cal_scores(s)
+                    return es_matrix * ws, ws
+
+                return cal_scores, cal_context, None
+            else:
+                es = []
+                ps = []
+
+                def append_e(e):
+                    es.append(e)
+                    ps.append(P * e)
+
+                def cal_scores(s):
+                    if len(ps) == 0:
+                        return None
+                    hs_matrix = dy.tanh(dy.colwise_add(dy.concatenate_cols(ps), W * s))
+                    return dy.softmax(dy.transpose(b * hs_matrix))
+
+                def cal_context(s):
+                    ws = cal_scores(s)
+                    if ws is None:
+                        return None, None
+                    return dy.concatenate_cols(es) * ws, ws
+
+                return cal_scores, cal_context, append_e
+
+
+class Decoder(object):
+    def __init__(self, model, op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim,
+                 num_layers, hidden_dim):
+        assert encode_dim == hidden_dim, "Encoder dimension dosen't match with decoder dimesion"
+
+        self.spec = op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim, \
+                    num_layers, hidden_dim
+        model = self.model = model.add_subcollection(self.__class__.__name__)
+
+        num_ops = len(op_names)
+        self.name2opid = {name: opid for opid, name in enumerate(op_names)}
+        self.op_embeds = Embedder(model, self.name2opid, op_embed_dim)
+        self.start_op = model.add_parameters(op_embed_dim)
+
+        self.prior_nums = prior_nums
+        self.num_embeds = Embedder(model, prior_nums, num_embed_dim)
+        self.dummy_arg = model.add_parameters(num_embed_dim)
+
+        self.neg_embed = model.add_parameters(sign_embed_dim)
+        self.pos_embed = model.add_parameters(sign_embed_dim)
+
+        self.decode_att = Attender(model, hidden_dim, encode_dim, att_dim)
+        self.input_att = Attender(model, hidden_dim + sign_embed_dim, encode_dim, att_dim)
+        self.exprs_att = Attender(model, hidden_dim + sign_embed_dim, hidden_dim, att_dim)
+
+        self.h2op = Linear(model, hidden_dim, num_ops)
+        self.h2ht = Linear(model, hidden_dim, hidden_dim)
+        self.h2copy = Linear(model, hidden_dim, 6)
+
+        num_prior = len(prior_nums)
+        self.sh2prior = Linear(model, hidden_dim + sign_embed_dim, num_prior)
+
+        self.opLSTM = dy.LSTMBuilder(num_layers, encode_dim + op_embed_dim + num_embed_dim, hidden_dim, model)
+
+    @classmethod
+    def from_spec(cls, spec, model):
+        op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim, num_layers, \
+            hidden_dim = spec
+        return cls(model, op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim,
+                   num_layers, hidden_dim)
+
+    def param_collection(self):
+        return self.model
+
+    def set_dropout(self, p):
+        self.opLSTM.set_dropout(p)
+
+    def disable_dropout(self):
+        self.opLSTM.disable_dropout()
+
+    def __call__(self, es, e, input_num_indexes):
+        assert type(input_num_indexes) == set
+
+        _, cal_context, _ = self.decode_att(es)
+        input_num_indexes = sorted(list(input_num_indexes))
+        cal_input_scores, _, _ = self.input_att([es[index] for index in input_num_indexes])
+        exprs_num_indexs = []
+        cal_exprs_scores, _, append_expr = self.exprs_att()
+        #s = [self.opLSTM.initial_state()]
+        s = [self.opLSTM.initial_state().set_s([e, dy.tanh(e)])]
+        setp = [-1]
+
+        def op_probs():
+            h = s[0].output()
+            return dy.softmax(self.h2op(h))
+
+        def op_prob(op):
+            probs = op_probs()
+            if type(op) == str:
+                op = self.name2opid[op]
+            return dy.pick(probs, op)
+
+        def copy_probs():
+            h = s[0].output()
+            return dy.softmax(self.h2copy(h))
+
+        def _signed_h(h=None, neg=False):
+            with parameters(self.neg_embed, self.pos_embed) as (neg_embed, pos_embed):
+                signed_h = dy.concatenate([h if h is not None else s[0].output(), neg_embed if neg else pos_embed])
+                return signed_h
+
+        def from_prior_probs(neg=False):
+            signed_h = _signed_h(neg=neg)
+            return dy.softmax(self.sh2prior(signed_h))
+
+        def from_prior_prob(num, neg=False):
+            probs = from_prior_probs(neg)
+            if type(num) == float:
+                num = self.name2opid[num]
+            return dy.pick(probs, num)
+
+        def from_input_probs(neg=False):
+            signed_h = _signed_h(neg=neg)
+            return cal_input_scores(signed_h)
+
+        def from_input_prob(selected_indexes, neg=False):
+            assert type(selected_indexes) == set
+
+            probs = from_input_probs(neg=neg)
+            if probs is None:
+                return dy.scalarInput(0)
+            mask = [1 if index in selected_indexes else 0 for index in input_num_indexes]
+            mask_expr = dy.reshape(dy.inputVector(mask), (len(input_num_indexes), 1))
+            return dy.dot_product(probs, mask_expr)
+
+        def from_exprs_probs(neg=False):
+            ht = dy.tanh(self.h2ht(s[0].output()))
+            signed_h = _signed_h(ht, neg)
+            return cal_exprs_scores(signed_h)
+
+        def from_exprs_prob(selected_indexes, neg=False):
+            assert type(selected_indexes) == set
+
+            probs = from_exprs_probs(neg)
+            if probs is None:
+                return dy.scalarInput(0)
+            mask = [1 if index in selected_indexes else 0 for index in exprs_num_indexs]
+            mask_expr = dy.inputVector(mask)
+            return dy.dot_product(probs, mask_expr)
+
+        with parameters(self.start_op, self.dummy_arg) as (start_op, dummy_arg):
+            def next_state(op, arg=None):
+                op_embed = self.op_embeds[op] if type(op) in (int, str) else op
+                arg_embed = dummy_arg if arg is None else self.num_embeds[arg]
+                context, _ = cal_context(s[0].output())
+                s[0] = s[0].add_input(dy.concatenate([context, op_embed, arg_embed]))
+                if op in ('end', self.name2opid['end']):
+                    append_expr(s[0].output())
+                    exprs_num_indexs.append(setp)
+                setp[0] += 1
+
+            next_state(start_op)
+            setp[0] = 0
+
+        return op_probs, op_prob, copy_probs, from_prior_probs, from_prior_prob, from_input_probs, \
+               from_input_prob, from_exprs_probs, from_exprs_prob, next_state
+
+
+def find_num_positions(dataset):
+    result = []
+    for question, options, trace in dataset:
+        input_num_indexes = set()
+        for index, token in enumerate(itertools.chain(*([question] + options))):
+            try:
+                if parse_expr(token).is_number:
+                    input_num_indexes.add(index)
+            except:
+                pass
+        result.append((question, options, trace, input_num_indexes))
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Train attention model')
+    parser.add_argument('--model_path', default=None, type=str)
+    parser.add_argument('--checkpoint_dir', default='./checkpoints', type=str)
+    parser.add_argument('--vocab_file', default='./vocab.dmp', type=str)
+    parser.add_argument('--train_set', default='./train_set.dmp', type=str)
+    parser.add_argument('--valid_set', default='./valid_set.dmp', type=str)
+    parser.add_argument('--batch_size', default=4, type=int)
+    parser.add_argument('--trainer', default='adam', choices={'sgd', 'adam', 'adagrad'}, type=str)
+    parser.add_argument('--word_embed_dim', default=256, type=int)
+    parser.add_argument('--encoder_num_layers', default=2, type=int)
+    parser.add_argument('--encoder_state_dim', default=256, type=int)
+    parser.add_argument('--op_embed_dim', default=32, type=int)
+    parser.add_argument('--num_embed_dim', default=256, type=int)
+    parser.add_argument('--sign_embed_dim', default=64, type=int)
+    parser.add_argument('--att_dim', default=128, type=int)
+    parser.add_argument('--decoder_num_layers', default=2, type=int)
+    parser.add_argument('--decoder_state_dim', default=256, type=int)
+    parser.add_argument('--dropout', default=None, type=float)
+
+    args, _ = parser.parse_known_args()
+
+    with open(args.vocab_file, 'rb') as f:
+        op_names, word2wid, wid2word, num2nid, nid2num = pickle.load(f)
+
+    with open(args.train_set, 'rb') as f:
+        train_set = pickle.load(f)
+
+    if len(train_set) > 0 and len(train_set[0]) == 3:
+        train_set = find_num_positions(train_set)
+        with open(args.train_set, 'wb') as f:
+            pickle.dump(train_set, f)
+
+    random.seed(0)
+    np.random.seed(0)
+
+    model = dy.ParameterCollection()
+
+    if args.trainer == 'sgd':
+        trainer = dy.SimpleSGDTrainer(model)
+    elif args.trainer == 'adam':
+        trainer = dy.AdamTrainer(model)
+    elif args.trainer == 'adagrad':
+        trainer = dy.AdagradTrainer(model)
+
+    encoder = Encoder(model, word2wid, args.word_embed_dim, args.encoder_num_layers, args.encoder_state_dim)
+    decoder = Decoder(model, op_names, args.op_embed_dim, num2nid, args.num_embed_dim, args.sign_embed_dim, \
+                      args.encoder_state_dim, args.att_dim, args.decoder_num_layers, args.decoder_state_dim)
+
+    if args.model_path is not None:
+        model.populate(args.model_path)
+
+    if not os.path.exists(args.checkpoint_dir):
+        os.makedirs(args.checkpoint_dir)
+
+    if args.dropout is not None:
+        encoder.set_dropout(args.dropout)
+        decoder.set_dropout(args.dropout)
+
+    num_problems = len(train_set)
+    for num_epoch in itertools.count(1):
+        random.shuffle(train_set)
+        epoch_loss = 0.0
+        epoch_seq_length = 0
+        batch_losses = []
+        batch_seq_length = 0
+        num_batch = 0
+        dy.renew_cg()
+        for i, (question, options, trace, input_num_indexes) in enumerate(train_set, 1):
+            es, e = encoder(question, options)
+            _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state \
+                = decoder(es, e, input_num_indexes)
+            problem_losses = []
+            for instruction in trace:
+                op_name = instruction[0]
+                item_loss = -dy.log(op_prob(op_name))
+                if len(instruction) > 1:
+                    _, pos_prior_nid, neg_prior_nid, pos_input_indexes, neg_input_indexes, pos_exprs_indexes, \
+                    neg_exprs_indexes = instruction
+                    copy_p = copy_probs()
+                    from_pos_prior_p = from_prior_prob(pos_prior_nid)
+                    from_neg_prior_p = from_prior_prob(pos_prior_nid, True)
+                    from_pos_input_p = from_input_prob(set(pos_input_indexes))
+                    from_neg_input_p = from_input_prob(set(neg_input_indexes), True)
+                    from_pos_exprs_p = from_exprs_prob(set(pos_exprs_indexes))
+                    from_neg_exprs_p = from_exprs_prob(set(neg_exprs_indexes), True)
+
+                    from_p = dy.concatenate([from_pos_prior_p, from_neg_prior_p,
+                                             from_pos_input_p, from_neg_input_p,
+                                             from_pos_exprs_p, from_neg_exprs_p])
+                    item_loss += -dy.log(dy.dot_product(copy_p, from_p))
+                problem_losses.append(item_loss)
+            batch_losses.append(dy.esum(problem_losses))
+            batch_seq_length += len(trace)
+            epoch_seq_length += len(trace)
+            if i % args.batch_size == 0 or i == num_problems:
+                batch_loss = dy.esum(batch_losses) / len(batch_losses)
+                batch_loss.backward()
+                trainer.update()
+                batch_loss_value = batch_loss.value()
+                batch_per_item_loss = batch_loss_value / batch_seq_length
+                epoch_loss += batch_loss_value
+                epoch_perplexity = math.exp(epoch_loss / epoch_seq_length)
+                dy.renew_cg()
+                num_batch += 1
+                batch_losses = []
+                batch_seq_length = 0
+                if num_batch % 1000 == 0:
+                    print('epoch %d, batch %d, batch_per_item_loss %f, epoch_perplexity %f' % \
+                          (num_epoch, num_batch, batch_per_item_loss, epoch_perplexity))
+        model.save('%s/epoch_%d.dmp' % (args.checkpoint_dir, num_epoch))
+
+
+if __name__ == "__main__":
+    main()
