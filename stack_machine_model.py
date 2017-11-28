@@ -1,10 +1,6 @@
 # coding: utf-8
 
-import dynet_config
-dynet_config.set(mem='8000', autobatch=1)
-
 import dynet as dy
-import numpy as np
 import argparse
 import pickle
 import itertools
@@ -109,7 +105,7 @@ class Encoder(object):
         bqs = self.bwdLSTM.initial_state().add_inputs(reversed(q_seq))
         es = [dy.concatenate([f.output(), b.output()]) for f, b in zip(fqs, reversed(bqs))]
 
-        e = dy.concatenate([fqs[-1].output(), bqs[-1].output()])
+        s = [dy.concatenate([x, y]) for x, y in zip(fqs[-1].s(), bqs[-1].s())]
 
         for option in options:
             o_seq = self.words_embeds(option)
@@ -117,7 +113,7 @@ class Encoder(object):
             bos = bqs[-1].transduce(reversed(o_seq))
             es.extend(dy.concatenate([f, b]) for f, b in zip(fos, reversed(bos)))
 
-        return es, e
+        return es, s
 
 
 class Attender(object):
@@ -178,7 +174,7 @@ class Attender(object):
 class Decoder(object):
     def __init__(self, model, op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim,
                  num_layers, hidden_dim):
-        assert encode_dim == hidden_dim, "Encoder dimension dosen't match with decoder dimesion"
+        assert encode_dim == hidden_dim, "Encoder dimension dosen't match with decoder dimension"
 
         self.spec = op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim, \
                     num_layers, hidden_dim
@@ -212,7 +208,7 @@ class Decoder(object):
     @classmethod
     def from_spec(cls, spec, model):
         op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim, num_layers, \
-            hidden_dim = spec
+        hidden_dim = spec
         return cls(model, op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim,
                    num_layers, hidden_dim)
 
@@ -233,9 +229,8 @@ class Decoder(object):
         cal_input_scores, _, _ = self.input_att([es[index] for index in input_num_indexes])
         exprs_num_indexs = []
         cal_exprs_scores, _, append_expr = self.exprs_att()
-        s = [self.opLSTM.initial_state()]
-        #s = [self.opLSTM.initial_state().set_s([e, dy.tanh(e)])]
-        setp = [-1]
+        s = [self.opLSTM.initial_state().set_s(e)]
+        step = [-1]
 
         def op_probs():
             h = s[0].output()
@@ -292,7 +287,7 @@ class Decoder(object):
             if probs is None:
                 return dy.scalarInput(0)
             mask = [1 if index in selected_indexes else 0 for index in exprs_num_indexs]
-            mask_expr = dy.inputVector(mask)
+            mask_expr = dy.reshape(dy.inputVector(mask), (len(exprs_num_indexs), 1))
             return dy.dot_product(probs, mask_expr)
 
         with parameters(self.start_op, self.dummy_arg) as (start_op, dummy_arg):
@@ -303,12 +298,11 @@ class Decoder(object):
                 s[0] = s[0].add_input(dy.concatenate([context, op_embed, arg_embed]))
                 if op in ('end', self.name2opid['end']):
                     append_expr(s[0].output())
-                    exprs_num_indexs.append(setp)
-                setp[0] += 1
+                    exprs_num_indexs.append(step[0])
+                step[0] += 1
 
-            #next_state(start_op)
-            s[0] = s[0].add_input(dy.concatenate([e, start_op, dummy_arg]))
-            setp[0] = 0
+            next_state(start_op)
+            step[0] = 0
 
         return op_probs, op_prob, copy_probs, from_prior_probs, from_prior_prob, from_input_probs, \
                from_input_prob, from_exprs_probs, from_exprs_prob, next_state
@@ -328,6 +322,36 @@ def find_num_positions(dataset):
     return result
 
 
+def cal_loss(encoder, decoder, question, options, input_num_indexes, trace):
+    es, e = encoder(question, options)
+    _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state \
+        = decoder(es, e, input_num_indexes)
+    problem_losses = []
+    for instruction in trace:
+        op_name = instruction[0]
+        item_loss = -dy.log(op_prob(op_name))
+        if len(instruction) > 1:
+            _, pos_prior_nid, neg_prior_nid, pos_input_indexes, neg_input_indexes, pos_exprs_indexes, \
+            neg_exprs_indexes = instruction
+            copy_p = copy_probs()
+            from_pos_prior_p = from_prior_prob(pos_prior_nid)
+            from_neg_prior_p = from_prior_prob(pos_prior_nid, True)
+            from_pos_input_p = from_input_prob(set(pos_input_indexes))
+            from_neg_input_p = from_input_prob(set(neg_input_indexes), True)
+            from_pos_exprs_p = from_exprs_prob(set(pos_exprs_indexes))
+            from_neg_exprs_p = from_exprs_prob(set(neg_exprs_indexes), True)
+
+            from_p = dy.concatenate([from_pos_prior_p, from_neg_prior_p,
+                                     from_pos_input_p, from_neg_input_p,
+                                     from_pos_exprs_p, from_neg_exprs_p])
+            item_loss += -dy.log(dy.dot_product(copy_p, from_p))
+            next_state(op_name, instruction[1])
+        else:
+            next_state(op_name)
+        problem_losses.append(item_loss)
+    return dy.esum(problem_losses)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Train attention model')
     parser.add_argument('--model_path', default=None, type=str)
@@ -335,7 +359,7 @@ def main():
     parser.add_argument('--vocab_file', default='./vocab.dmp', type=str)
     parser.add_argument('--train_set', default='./train_set.dmp', type=str)
     parser.add_argument('--valid_set', default='./valid_set.dmp', type=str)
-    parser.add_argument('--batch_size', default=4, type=int)
+    parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--trainer', default='adam', choices={'sgd', 'adam', 'adagrad'}, type=str)
     parser.add_argument('--word_embed_dim', default=256, type=int)
     parser.add_argument('--encoder_num_layers', default=2, type=int)
@@ -347,6 +371,7 @@ def main():
     parser.add_argument('--decoder_num_layers', default=2, type=int)
     parser.add_argument('--decoder_state_dim', default=256, type=int)
     parser.add_argument('--dropout', default=None, type=float)
+    parser.add_argument('--seed', default=11747, type=int)
 
     args, _ = parser.parse_known_args()
 
@@ -361,8 +386,7 @@ def main():
         with open(args.train_set, 'wb') as f:
             pickle.dump(train_set, f)
 
-    random.seed(0)
-    np.random.seed(0)
+    random.seed(args.seed)
 
     model = dy.ParameterCollection()
 
@@ -374,14 +398,16 @@ def main():
         trainer = dy.AdagradTrainer(model)
 
     encoder = Encoder(model, word2wid, args.word_embed_dim, args.encoder_num_layers, args.encoder_state_dim)
-    decoder = Decoder(model, op_names, args.op_embed_dim, num2nid, args.num_embed_dim, args.sign_embed_dim, \
+    decoder = Decoder(model, op_names, args.op_embed_dim, num2nid, args.num_embed_dim, args.sign_embed_dim,
                       args.encoder_state_dim, args.att_dim, args.decoder_num_layers, args.decoder_state_dim)
-
-    if args.model_path is not None:
-        model.populate(args.model_path)
 
     if not os.path.exists(args.checkpoint_dir):
         os.makedirs(args.checkpoint_dir)
+
+    if args.model_path is None:
+        model.save('%s/init.dmp' % args.checkpoint_dir)
+    else:
+        model.populate(args.model_path)
 
     if args.dropout is not None:
         encoder.set_dropout(args.dropout)
@@ -397,30 +423,8 @@ def main():
         num_batch = 0
         dy.renew_cg()
         for i, (question, options, trace, input_num_indexes) in enumerate(train_set, 1):
-            es, e = encoder(question, options)
-            _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state \
-                = decoder(es, e, input_num_indexes)
-            problem_losses = []
-            for instruction in trace:
-                op_name = instruction[0]
-                item_loss = -dy.log(op_prob(op_name))
-                if len(instruction) > 1:
-                    _, pos_prior_nid, neg_prior_nid, pos_input_indexes, neg_input_indexes, pos_exprs_indexes, \
-                    neg_exprs_indexes = instruction
-                    copy_p = copy_probs()
-                    from_pos_prior_p = from_prior_prob(pos_prior_nid)
-                    from_neg_prior_p = from_prior_prob(pos_prior_nid, True)
-                    from_pos_input_p = from_input_prob(set(pos_input_indexes))
-                    from_neg_input_p = from_input_prob(set(neg_input_indexes), True)
-                    from_pos_exprs_p = from_exprs_prob(set(pos_exprs_indexes))
-                    from_neg_exprs_p = from_exprs_prob(set(neg_exprs_indexes), True)
-
-                    from_p = dy.concatenate([from_pos_prior_p, from_neg_prior_p,
-                                             from_pos_input_p, from_neg_input_p,
-                                             from_pos_exprs_p, from_neg_exprs_p])
-                    item_loss += -dy.log(dy.dot_product(copy_p, from_p))
-                problem_losses.append(item_loss)
-            batch_losses.append(dy.esum(problem_losses))
+            problem_loss = cal_loss(encoder, decoder, question, options, input_num_indexes, trace)
+            batch_losses.append(problem_loss)
             batch_seq_length += len(trace)
             epoch_seq_length += len(trace)
             if i % args.batch_size == 0 or i == num_problems:
@@ -435,11 +439,12 @@ def main():
                 num_batch += 1
                 batch_losses = []
                 batch_seq_length = 0
-                if num_batch % 1000 == 0:
+                if num_batch % 20 == 0:
                     print('epoch %d, batch %d, batch_per_item_loss %f, epoch_perplexity %f' % \
                           (num_epoch, num_batch, batch_per_item_loss, epoch_perplexity))
         model.save('%s/epoch_%d.dmp' % (args.checkpoint_dir, num_epoch))
 
 
+# python model.py --dynet-seed 11747 --dynet-autobatch 1 --dynet-mem 11000 --dynet-gpu --batch_size 64 --dropout 0.7
 if __name__ == "__main__":
     main()
