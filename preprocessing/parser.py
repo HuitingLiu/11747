@@ -537,29 +537,3 @@ def parse_question(text):
     result = [x.strip() for x in result]
     result = [x.lower() for x in result if x]
     return result
-
-
-# In[ ]:
-
-
-import sys
-import json
-
-
-# In[ ]:
-
-
-with open('data/train.json') as f:
-    for (i, line) in enumerate(f):
-        d = json.loads(line)
-        if i < 33432:
-            continue
-        break
-        if i % 20 == 0 or True:
-            print(i)
-        d = json.loads(line)
-        parse_question(d['question'])
-        for option in d['options']:
-            parse_question(option)
-        extract_instructions(d['rationale'])
-

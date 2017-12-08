@@ -1,6 +1,7 @@
 # coding: utf-8
 
 import dynet as dy
+import numpy as np
 import argparse
 import pickle
 import itertools
@@ -9,7 +10,11 @@ import math
 import os
 
 from contextlib import contextmanager
+from collections import Iterable
+from itertools import chain
 from sympy.parsing.sympy_parser import parse_expr
+from interpreter import Interpreter
+from preprocessing.parser import parse_question, extract_instructions
 
 UNK = ('<UNK>',)
 
@@ -175,6 +180,7 @@ class Decoder(object):
     def __init__(self, model, op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim,
                  num_layers, hidden_dim):
         assert encode_dim == hidden_dim, "Encoder dimension dosen't match with decoder dimension"
+        assert type(op_names) == list
 
         self.spec = op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim, \
                     num_layers, hidden_dim
@@ -182,10 +188,12 @@ class Decoder(object):
 
         num_ops = len(op_names)
         self.name2opid = {name: opid for opid, name in enumerate(op_names)}
+        self.opid2name = {opid: name for opid, name in enumerate(op_names)}
         self.op_embeds = Embedder(model, self.name2opid, op_embed_dim)
         self.start_op = model.add_parameters(op_embed_dim)
 
         self.prior_nums = prior_nums
+        self.nid2num = {nid: num for num, nid in prior_nums.items()}
         self.num_embeds = Embedder(model, prior_nums, num_embed_dim)
         self.dummy_arg = model.add_parameters(num_embed_dim)
 
@@ -222,10 +230,10 @@ class Decoder(object):
         self.opLSTM.disable_dropout()
 
     def __call__(self, es, e, input_num_indexes):
-        assert type(input_num_indexes) == set
+        assert isinstance(input_num_indexes, Iterable)
 
         _, cal_context, _ = self.decode_att(es)
-        input_num_indexes = sorted(list(input_num_indexes))
+        input_num_indexes = sorted(set(input_num_indexes))
         cal_input_scores, _, _ = self.input_att([es[index] for index in input_num_indexes])
         exprs_num_indexs = []
         cal_exprs_scores, _, append_expr = self.exprs_att()
@@ -322,6 +330,61 @@ def find_num_positions(dataset):
     return result
 
 
+def build_index(question, options):
+    input_nums = {}
+    for index, token in enumerate(chain(*([question] + options))):
+        try:
+            val = parse_expr(token)
+            if val.is_number:
+                input_nums[index] = val
+        except:
+            pass
+    return input_nums
+
+
+def solve(encoder, decoder, raw_question, raw_options, max_op_count):
+    copy_id2src = ['pos_prior', 'neg_prior', 'pos_input', 'neg_input', 'pos_exprs', 'neg_exprs']
+    question = parse_question(raw_question)
+    options = [parse_question(raw_option) for raw_option in raw_options]
+    input_nums = build_index(question, options)
+    input_nums_indexes = sorted(input_nums.keys())
+    UNK_id = decoder.prior_nums[UNK]
+    dy.renew_cg()
+    es, e = encoder(question, options)
+    op_probs, _, copy_probs, from_prior_probs, _, from_input_probs, _, from_exprs_probs, _, next_state \
+        = decoder(es, e, input_nums.keys())
+    interp = Interpreter()
+    expr_vals = []
+    for _ in range(max_op_count):
+        p_op = op_probs().npvalue()
+        p_op[[op_name not in interp.valid_ops for op_id, op_name in decoder.opid2name.items()]] = -np.inf
+        op_name = decoder.opid2name[p_op.argmax()]
+        arg_num = None
+        if op_name == 'load':
+            copy_src = copy_id2src[copy_probs().npvalue().argmax()]
+            neg = copy_src.startswith('neg')
+            if copy_src.endswith('_input'):
+                arg_num = input_nums[input_nums_indexes[from_input_probs(neg=neg).npvalue().argmax()]]
+            elif copy_src.endswith('_prior'):
+                p_prior = from_prior_probs(neg=neg).npvalue()
+                p_prior[UNK_id] = -np.inf
+                arg_num = decoder.nid2num[p_prior.argmax()]
+            elif copy_src.endswith('_exprs'):
+                arg_num = expr_vals[from_exprs_probs(neg=neg).npvalue().argmax()]
+            else:
+                assert False
+            if neg:
+                arg_num *= -1
+        next_state(op_name, arg_num)
+        end_expr, expr_val = interp.next_op(op_name, arg_num)
+        if end_expr:
+            expr_vals.append(expr_val)
+            if op_name == 'exit':
+                break
+            interp = Interpreter()
+    return expr_vals
+
+
 def cal_loss(encoder, decoder, question, options, input_num_indexes, trace):
     es, e = encoder(question, options)
     _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state \
@@ -372,6 +435,7 @@ def main():
     parser.add_argument('--decoder_state_dim', default=256, type=int)
     parser.add_argument('--dropout', default=None, type=float)
     parser.add_argument('--seed', default=11747, type=int)
+    parser.add_argument('--max_op_count', default=50, type=int)
 
     args, _ = parser.parse_known_args()
 
