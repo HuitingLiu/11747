@@ -377,6 +377,7 @@ def main():
 
     with open(args.vocab_file, 'rb') as f:
         op_names, word2wid, wid2word, num2nid, nid2num = pickle.load(f)
+        op_names = sorted(op_names)
 
     with open(args.train_set, 'rb') as f:
         train_set = pickle.load(f)
