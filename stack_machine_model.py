@@ -141,6 +141,7 @@ class Attender(object):
     def __call__(self, es=None):
         with parameters(self.P, self.W, self.b) as (P, W, b):
             if es:
+                assert len(es) > 0
                 es_matrix = dy.concatenate_cols(es)
                 ps_matrix = P * es_matrix
 
@@ -148,9 +149,13 @@ class Attender(object):
                     hs_matrix = dy.tanh(dy.colwise_add(ps_matrix, W * s))
                     return dy.softmax(dy.transpose(b * hs_matrix))
 
-                def cal_context(s):
+                def cal_context(s, selected=None):
                     ws = cal_scores(s)
-                    return es_matrix * ws, ws
+                    if selected is None:
+                        return es_matrix * ws, ws
+                    selected_ws = dy.select_cols(ws, selected)
+                    selected_ws /= dy.sum_elems(selected_ws)
+                    return dy.concatenate_cols([es[index] for index in selected]) * selected_ws, ws
 
                 return cal_scores, cal_context, None
             else:
@@ -167,11 +172,15 @@ class Attender(object):
                     hs_matrix = dy.tanh(dy.colwise_add(dy.concatenate_cols(ps), W * s))
                     return dy.softmax(dy.transpose(b * hs_matrix))
 
-                def cal_context(s):
+                def cal_context(s, selected=None):
                     ws = cal_scores(s)
                     if ws is None:
                         return None, None
-                    return dy.concatenate_cols(es) * ws, ws
+                    if selected is None:
+                        return dy.concatenate_cols(es) * ws, ws
+                    selected_ws = dy.select_cols(ws, selected)
+                    selected_ws /= dy.sum_elems(selected_ws)
+                    return dy.concatenate_cols([es[index] for index in selected]) * selected_ws, ws
 
                 return cal_scores, cal_context, append_e
 
@@ -180,6 +189,7 @@ class Decoder(object):
     def __init__(self, model, op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim,
                  num_layers, hidden_dim):
         assert encode_dim == hidden_dim, "Encoder dimension dosen't match with decoder dimension"
+        assert encode_dim == num_embed_dim, "Number embedding dimension doesn't match with encoder dimension"
         assert type(op_names) == list
 
         self.spec = op_names, op_embed_dim, prior_nums, num_embed_dim, sign_embed_dim, encode_dim, att_dim, \
@@ -195,10 +205,17 @@ class Decoder(object):
         self.prior_nums = prior_nums
         self.nid2num = {nid: num for num, nid in prior_nums.items()}
         self.num_embeds = Embedder(model, prior_nums, num_embed_dim)
-        self.dummy_arg = model.add_parameters(num_embed_dim)
+        self.dummy_arg = model.add_parameters(num_embed_dim + sign_embed_dim)
 
         self.neg_embed = model.add_parameters(sign_embed_dim)
         self.pos_embed = model.add_parameters(sign_embed_dim)
+
+        self.neg_input_embed = model.add_parameters(sign_embed_dim)
+        self.pos_input_embed = model.add_parameters(sign_embed_dim)
+        self.neg_exprs_embed = model.add_parameters(sign_embed_dim)
+        self.pos_exprs_embed = model.add_parameters(sign_embed_dim)
+        self.neg_prior_embed = model.add_parameters(sign_embed_dim)
+        self.pos_prior_embed = model.add_parameters(sign_embed_dim)
 
         self.decode_att = Attender(model, hidden_dim, encode_dim, att_dim)
         self.input_att = Attender(model, hidden_dim + sign_embed_dim, encode_dim, att_dim)
@@ -211,7 +228,7 @@ class Decoder(object):
         num_prior = len(prior_nums)
         self.sh2prior = Linear(model, hidden_dim + sign_embed_dim, num_prior)
 
-        self.opLSTM = dy.LSTMBuilder(num_layers, encode_dim + op_embed_dim + num_embed_dim, hidden_dim, model)
+        self.opLSTM = dy.LSTMBuilder(num_layers, encode_dim + op_embed_dim + num_embed_dim + sign_embed_dim, hidden_dim, model)
 
     @classmethod
     def from_spec(cls, spec, model):
@@ -234,9 +251,9 @@ class Decoder(object):
 
         _, cal_context, _ = self.decode_att(es)
         input_num_indexes = sorted(set(input_num_indexes))
-        cal_input_scores, _, _ = self.input_att([es[index] for index in input_num_indexes])
+        cal_input_scores, cal_input_context, _ = self.input_att([es[index] for index in input_num_indexes])
         exprs_num_indexs = []
-        cal_exprs_scores, _, append_expr = self.exprs_att()
+        cal_exprs_scores, cal_exprs_context, append_expr = self.exprs_att()
         s = [self.opLSTM.initial_state().set_s(e)]
         step = [-1]
 
@@ -267,7 +284,8 @@ class Decoder(object):
             probs = from_prior_probs(neg)
             if type(num) == float:
                 num = self.name2opid[num]
-            return dy.pick(probs, num)
+            prior_ref = dy.concatenate([self.num_embeds[num], self.neg_prior_embed if neg else self.pos_prior_embed])
+            return dy.pick(probs, num), prior_ref
 
         def from_input_probs(neg=False):
             signed_h = _signed_h(neg=neg)
@@ -276,12 +294,14 @@ class Decoder(object):
         def from_input_prob(selected_indexes, neg=False):
             assert type(selected_indexes) == set
 
-            probs = from_input_probs(neg=neg)
+            selected_indexes = [index for index, old_index in enumerate(input_num_indexes) if old_index in selected_indexes]
+
+            signed_h = _signed_h(neg=neg)
+            input_ref, probs = cal_input_context(signed_h, selected_indexes)
+            input_ref = dy.concatenate([input_ref, self.neg_input_embed if neg else self.pos_input_embed])
             if probs is None:
                 return dy.scalarInput(0)
-            mask = [1 if index in selected_indexes else 0 for index in input_num_indexes]
-            mask_expr = dy.reshape(dy.inputVector(mask), (len(input_num_indexes), 1))
-            return dy.dot_product(probs, mask_expr)
+            return dy.sum_elems(dy.select_cols(probs, selected_indexes)), input_ref
 
         def from_exprs_probs(neg=False):
             ht = dy.tanh(self.h2ht(s[0].output()))
@@ -290,18 +310,20 @@ class Decoder(object):
 
         def from_exprs_prob(selected_indexes, neg=False):
             assert type(selected_indexes) == set
+            selected_indexes = [index for index, old_index in enumerate(exprs_num_indexs) if old_index in selected_indexes]
 
-            probs = from_exprs_probs(neg)
+            ht = dy.tanh(self.h2ht(s[0].output()))
+            signed_h = _signed_h(ht, neg)
+            exprs_ref, probs = cal_exprs_context(signed_h, selected_indexes)
+            exprs_ref = dy.concatenate([exprs_ref, self.neg_exprs_embed if neg else self.pos_exprs_embed])
             if probs is None:
                 return dy.scalarInput(0)
-            mask = [1 if index in selected_indexes else 0 for index in exprs_num_indexs]
-            mask_expr = dy.reshape(dy.inputVector(mask), (len(exprs_num_indexs), 1))
-            return dy.dot_product(probs, mask_expr)
+            return dy.sum_elems(dy.select_cols(probs, selected_indexes)), exprs_ref
 
         with parameters(self.start_op, self.dummy_arg) as (start_op, dummy_arg):
-            def next_state(op, arg=None):
+            def next_state(op, arg_ref=None):
                 op_embed = self.op_embeds[op] if type(op) in (int, str) else op
-                arg_embed = dummy_arg if arg is None else self.num_embeds[arg]
+                arg_embed = dummy_arg if arg_ref is None else arg_ref
                 context, _ = cal_context(s[0].output())
                 s[0] = s[0].add_input(dy.concatenate([context, op_embed, arg_embed]))
                 if op in ('end', self.name2opid['end']):
@@ -397,18 +419,21 @@ def cal_loss(encoder, decoder, question, options, input_num_indexes, trace):
             _, pos_prior_nid, neg_prior_nid, pos_input_indexes, neg_input_indexes, pos_exprs_indexes, \
             neg_exprs_indexes = instruction
             copy_p = copy_probs()
-            from_pos_prior_p = from_prior_prob(pos_prior_nid)
-            from_neg_prior_p = from_prior_prob(neg_prior_nid, True)
-            from_pos_input_p = from_input_prob(set(pos_input_indexes))
-            from_neg_input_p = from_input_prob(set(neg_input_indexes), True)
-            from_pos_exprs_p = from_exprs_prob(set(pos_exprs_indexes))
-            from_neg_exprs_p = from_exprs_prob(set(neg_exprs_indexes), True)
+            from_pos_prior_p, pos_prior_ref = from_prior_prob(pos_prior_nid)
+            from_neg_prior_p, neg_prior_ref = from_prior_prob(neg_prior_nid, True)
+            from_pos_input_p, pos_input_ref = from_input_prob(set(pos_input_indexes))
+            from_neg_input_p, neg_input_ref = from_input_prob(set(neg_input_indexes), True)
+            from_pos_exprs_p, pos_exprs_ref = from_exprs_prob(set(pos_exprs_indexes))
+            from_neg_exprs_p, neg_exprs_ref = from_exprs_prob(set(neg_exprs_indexes), True)
 
             from_p = dy.concatenate([from_pos_prior_p, from_neg_prior_p,
                                      from_pos_input_p, from_neg_input_p,
                                      from_pos_exprs_p, from_neg_exprs_p])
             item_loss += -dy.log(dy.dot_product(copy_p, from_p))
-            next_state(op_name, instruction[1])
+            arg_ref = dy.concatenate_cols([pos_prior_ref, neg_prior_ref,
+                                           pos_input_ref, neg_input_ref,
+                                           pos_exprs_ref, neg_exprs_ref]) * copy_p
+            next_state(op_name, arg_ref)
         else:
             next_state(op_name)
         problem_losses.append(item_loss)
