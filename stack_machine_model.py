@@ -153,8 +153,8 @@ class Attender(object):
                     ws = cal_scores(s)
                     if selected is None:
                         return es_matrix * ws, ws
-                    selected_ws = dy.select_cols(ws, selected)
-                    selected_ws /= dy.sum_elems(selected_ws)
+                    selected_ws = dy.select_rows(ws, selected)
+                    selected_ws = dy.cdiv(selected_ws, dy.sum_elems(selected_ws))
                     return dy.concatenate_cols([es[index] for index in selected]) * selected_ws, ws
 
                 return cal_scores, cal_context, None
@@ -178,8 +178,8 @@ class Attender(object):
                         return None, None
                     if selected is None:
                         return dy.concatenate_cols(es) * ws, ws
-                    selected_ws = dy.select_cols(ws, selected)
-                    selected_ws /= dy.sum_elems(selected_ws)
+                    selected_ws = dy.select_rows(ws, selected)
+                    selected_ws = dy.cdiv(selected_ws, dy.sum_elems(selected_ws))
                     return dy.concatenate_cols([es[index] for index in selected]) * selected_ws, ws
 
                 return cal_scores, cal_context, append_e
@@ -206,6 +206,7 @@ class Decoder(object):
         self.nid2num = {nid: num for num, nid in prior_nums.items()}
         self.num_embeds = Embedder(model, prior_nums, num_embed_dim)
         self.dummy_arg = model.add_parameters(num_embed_dim + sign_embed_dim)
+        self.dummy_arg_dim = num_embed_dim + sign_embed_dim
 
         self.neg_embed = model.add_parameters(sign_embed_dim)
         self.pos_embed = model.add_parameters(sign_embed_dim)
@@ -284,7 +285,8 @@ class Decoder(object):
             probs = from_prior_probs(neg)
             if type(num) == float:
                 num = self.name2opid[num]
-            prior_ref = dy.concatenate([self.num_embeds[num], self.neg_prior_embed if neg else self.pos_prior_embed])
+            with parameters(self.neg_prior_embed, self.pos_prior_embed) as (neg_prior_embed, pos_prior_embed):
+                prior_ref = dy.concatenate([self.num_embeds[num], neg_prior_embed if neg else pos_prior_embed])
             return dy.pick(probs, num), prior_ref
 
         def from_input_probs(neg=False):
@@ -293,14 +295,14 @@ class Decoder(object):
 
         def from_input_prob(selected_indexes, neg=False):
             assert type(selected_indexes) == set
-
             selected_indexes = [index for index, old_index in enumerate(input_num_indexes) if old_index in selected_indexes]
+            if len(selected_indexes) == 0:
+                return dy.scalarInput(0), dy.zeros(self.dummy_arg_dim)
 
             signed_h = _signed_h(neg=neg)
             input_ref, probs = cal_input_context(signed_h, selected_indexes)
-            input_ref = dy.concatenate([input_ref, self.neg_input_embed if neg else self.pos_input_embed])
-            if probs is None:
-                return dy.scalarInput(0)
+            with parameters(self.neg_input_embed, self.pos_input_embed) as (neg_input_embed, pos_input_embed):
+                input_ref = dy.concatenate([input_ref, neg_input_embed if neg else pos_input_embed])
             return dy.sum_elems(dy.select_cols(probs, selected_indexes)), input_ref
 
         def from_exprs_probs(neg=False):
@@ -311,13 +313,14 @@ class Decoder(object):
         def from_exprs_prob(selected_indexes, neg=False):
             assert type(selected_indexes) == set
             selected_indexes = [index for index, old_index in enumerate(exprs_num_indexs) if old_index in selected_indexes]
+            if len(selected_indexes) == 0:
+                return dy.scalarInput(0), dy.zeros(self.dummy_arg_dim)
 
             ht = dy.tanh(self.h2ht(s[0].output()))
             signed_h = _signed_h(ht, neg)
             exprs_ref, probs = cal_exprs_context(signed_h, selected_indexes)
-            exprs_ref = dy.concatenate([exprs_ref, self.neg_exprs_embed if neg else self.pos_exprs_embed])
-            if probs is None:
-                return dy.scalarInput(0)
+            with parameters(self.neg_exprs_embed, self.pos_exprs_embed) as (neg_exprs_embed, pos_exprs_embed):
+                exprs_ref = dy.concatenate([exprs_ref, neg_exprs_embed if neg else pos_exprs_embed])
             return dy.sum_elems(dy.select_cols(probs, selected_indexes)), exprs_ref
 
         with parameters(self.start_op, self.dummy_arg) as (start_op, dummy_arg):
@@ -535,6 +538,6 @@ def main():
         model.save('%s/epoch_%d.dmp' % (args.checkpoint_dir, num_epoch))
 
 
-# python model.py --dynet-seed 11747 --dynet-autobatch 1 --dynet-mem 11000 --dynet-gpu --batch_size 64 --dropout 0.7
+# python stack_machine_model.py --dynet-seed 11747 --dynet-autobatch 1 --dynet-mem 11000 --dynet-gpu --batch_size 64 --dropout 0.7
 if __name__ == "__main__":
     main()
