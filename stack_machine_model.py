@@ -398,7 +398,7 @@ def cal_loss(encoder, decoder, question, options, input_num_indexes, trace):
             neg_exprs_indexes = instruction
             copy_p = copy_probs()
             from_pos_prior_p = from_prior_prob(pos_prior_nid)
-            from_neg_prior_p = from_prior_prob(pos_prior_nid, True)
+            from_neg_prior_p = from_prior_prob(neg_prior_nid, True)
             from_pos_input_p = from_input_prob(set(pos_input_indexes))
             from_neg_input_p = from_input_prob(set(neg_input_indexes), True)
             from_pos_exprs_p = from_exprs_prob(set(pos_exprs_indexes))
