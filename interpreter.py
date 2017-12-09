@@ -72,7 +72,7 @@ class Interpreter:
         if n >= 2:
             for op_name, op_func in Interpreter.binary_ops.items():
                 try:
-                    self.unary_op(op_func, self.stack[-2:])
+                    self.binary_op(op_func, self.stack[-2:])
                     ops.add(op_name)
                 except:
                     pass
