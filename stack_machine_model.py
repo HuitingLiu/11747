@@ -303,7 +303,7 @@ class Decoder(object):
             input_ref, probs = cal_input_context(signed_h, selected_indexes)
             with parameters(self.neg_input_embed, self.pos_input_embed) as (neg_input_embed, pos_input_embed):
                 input_ref = dy.concatenate([input_ref, neg_input_embed if neg else pos_input_embed])
-            return dy.sum_elems(dy.select_cols(probs, selected_indexes)), input_ref
+            return dy.sum_elems(dy.select_rows(probs, selected_indexes)), input_ref
 
         def from_exprs_probs(neg=False):
             ht = dy.tanh(self.h2ht(s[0].output()))
@@ -321,7 +321,7 @@ class Decoder(object):
             exprs_ref, probs = cal_exprs_context(signed_h, selected_indexes)
             with parameters(self.neg_exprs_embed, self.pos_exprs_embed) as (neg_exprs_embed, pos_exprs_embed):
                 exprs_ref = dy.concatenate([exprs_ref, neg_exprs_embed if neg else pos_exprs_embed])
-            return dy.sum_elems(dy.select_cols(probs, selected_indexes)), exprs_ref
+            return dy.sum_elems(dy.select_rows(probs, selected_indexes)), exprs_ref
 
         with parameters(self.start_op, self.dummy_arg) as (start_op, dummy_arg):
             def next_state(op, arg_ref=None):
