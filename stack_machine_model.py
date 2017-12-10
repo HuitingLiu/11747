@@ -333,6 +333,7 @@ class Decoder(object):
                     append_expr(s[0].output())
                     exprs_num_indexs.append(step[0])
                 step[0] += 1
+                return s[0].output()
 
             next_state(start_op)
             step[0] = 0
@@ -380,29 +381,41 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
         = decoder(es, e, input_nums.keys())
     interp = Interpreter()
     expr_vals = []
+    ds = []
     for _ in range(max_op_count):
         p_op = op_probs().npvalue()
         p_op[[op_name not in interp.valid_ops for op_id, op_name in decoder.opid2name.items()]] = -np.inf
         op_name = decoder.opid2name[p_op.argmax()]
         arg_num = None
+        arg_ref = None
         if op_name == 'load':
             copy_src = copy_id2src[copy_probs().npvalue().argmax()]
             neg = copy_src.startswith('neg')
             if copy_src.endswith('_input'):
-                arg_num = input_nums[input_nums_indexes[from_input_probs(neg=neg).npvalue().argmax()]]
+                num_index = input_nums_indexes[from_input_probs(neg=neg).npvalue().argmax()]
+                arg_num = input_nums[num_index]
+                with parameters(decoder.neg_input_embed, decoder.pos_input_embed) as (neg_input_embed, pos_input_embed):
+                    arg_ref = dy.concatenate([es[num_index], neg_input_embed if neg else pos_input_embed])
             elif copy_src.endswith('_prior'):
                 p_prior = from_prior_probs(neg=neg).npvalue()
                 p_prior[UNK_id] = -np.inf
-                arg_num = decoder.nid2num[p_prior.argmax()]
+                nid = p_prior.argmax()
+                arg_num = decoder.nid2num[nid]
+                with parameters(decoder.neg_prior_embed, decoder.pos_prior_embed) as (neg_prior_embed, pos_prior_embed):
+                    arg_ref = dy.concatenate([decoder.num_embeds[nid], neg_prior_embed if neg else pos_prior_embed])
             elif copy_src.endswith('_exprs'):
-                arg_num = expr_vals[from_exprs_probs(neg=neg).npvalue().argmax()]
+                expr_index = from_exprs_probs(neg=neg).npvalue().argmax()
+                arg_num = expr_vals[expr_index]
+                with parameters(decoder.neg_exprs_embed, decoder.pos_exprs_embed) as (neg_exprs_embed, pos_exprs_embed):
+                    arg_ref = dy.concatenate([ds[expr_index], neg_exprs_embed if neg else pos_exprs_embed])
             else:
                 assert False
             if neg:
                 arg_num *= -1
-        next_state(op_name, arg_num)
+        dh = next_state(op_name, arg_num)
         end_expr, expr_val = interp.next_op(op_name, arg_num)
         if end_expr:
+            ds.append(dh)
             expr_vals.append(expr_val)
             if op_name == 'exit':
                 break
