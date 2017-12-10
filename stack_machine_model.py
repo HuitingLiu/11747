@@ -285,6 +285,8 @@ class Decoder(object):
             probs = from_prior_probs(neg)
             if type(num) == float:
                 num = self.name2opid[num]
+            if self.nid2num[num] == UNK:
+                return dy.scalarInput(0), dy.zeros(self.dummy_arg_dim)
             with parameters(self.neg_prior_embed, self.pos_prior_embed) as (neg_prior_embed, pos_prior_embed):
                 prior_ref = dy.concatenate([self.num_embeds[num], neg_prior_embed if neg else pos_prior_embed])
             return dy.pick(probs, num), prior_ref
@@ -412,7 +414,7 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
                 assert False
             if neg:
                 arg_num *= -1
-        dh = next_state(op_name, arg_num)
+        dh = next_state(op_name, arg_ref)
         end_expr, expr_val = interp.next_op(op_name, arg_num)
         if end_expr:
             ds.append(dh)
