@@ -469,6 +469,7 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
     interp = Interpreter()
     expr_vals = []
     ds = []
+    trace = []
     for _ in range(max_op_count):
         p_op = op_probs().npvalue()
         p_op[[op_name not in interp.valid_ops for op_id, op_name in decoder.opid2name.items()]] = -np.inf
@@ -500,6 +501,7 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
             if neg:
                 arg_num *= -1
         end_expr, expr_val = interp.next_op(op_name, arg_num)
+        trace.append((op_name, arg_num))
         if end_expr:
             ds.append(dh)
             expr_vals.append(expr_val)
@@ -508,10 +510,14 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
             interp = Interpreter()
         dh = next_state(expr_val, op_name, arg_ref)
     answer = predict_answer().npvalue().argmax()
-    return expr_vals, answer
+    return trace, expr_vals, answer
 
 
 def cal_loss(encoder, decoder, question, options, input_num_indexes, trace, answer):
+    option_orders = [0, 1, 2, 3, 4]
+    random.shuffle(option_order)
+    options = [options[index] for index in option_orders]
+    answer = option_orders[answer]
     es, e, option_embeds = encoder(question, options)
     _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state, predict_answer \
         = decoder(es, e, option_embeds, input_num_indexes)
