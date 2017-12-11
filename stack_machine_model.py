@@ -15,6 +15,8 @@ from itertools import chain
 from sympy.parsing.sympy_parser import parse_expr
 from interpreter import Interpreter
 from preprocessing.parser import parse_question, extract_instructions
+from timeout_decorator import timeout
+from decimal import Decimal
 
 UNK = ('<UNK>',)
 
@@ -22,6 +24,33 @@ UNK = ('<UNK>',)
 @contextmanager
 def parameters(*params):
     yield tuple(map(lambda x: dy.parameter(x), params))
+
+
+def decompose(x):
+    num = Decimal(x)
+    sign, digits, exponent = num.as_tuple()
+    fexp = float(len(digits) + exponent - 1)
+    fman = float(num.scaleb(-fexp).normalize())
+    return fexp, fman
+
+
+def val_embed(val):
+    isfloat = False
+    isnan = False
+    isinf = False
+    isneg = False
+    fexp = 0.0
+    fman = 0.0
+    try:
+        val = float(val)
+        isfloat = True
+        isnan = math.isnan(val)
+        isinf = math.isinf(val)
+        isneg = val < 0
+        fexp, fman = decompose(val)
+    except:
+        pass
+    return dy.inputVector([float(isfloat), float(isnan), float(isinf), float(isneg), fexp, fman])
 
 
 class Embedder(object):
@@ -84,8 +113,9 @@ class Encoder(object):
         model = self.model = model.add_subcollection(self.__class__.__name__)
         self.spec = word2wid, word_embed_dim, num_layers, hidden_dim
 
-        self.fwdLSTM = dy.LSTMBuilder(num_layers, word_embed_dim, hidden_dim / 2, model)
-        self.bwdLSTM = dy.LSTMBuilder(num_layers, word_embed_dim, hidden_dim / 2, model)
+        val_repr_dim = 6
+        self.fwdLSTM = dy.LSTMBuilder(num_layers, word_embed_dim + val_repr_dim, hidden_dim / 2, model)
+        self.bwdLSTM = dy.LSTMBuilder(num_layers, word_embed_dim + val_repr_dim, hidden_dim / 2, model)
 
     @classmethod
     def from_spec(cls, spec, model):
@@ -103,8 +133,16 @@ class Encoder(object):
         self.fwdLSTM.disable_dropout()
         self.bwdLSTM.disable_dropout()
 
+    def embed_with_val(self, words):
+        result = []
+        for word, val in words:
+            word_embed = self.words_embeds[word]
+            val_repr = val_embed(val)
+            result.append(dy.concatenate([word_embed, val_repr]))
+        return result
+
     def __call__(self, question, options):
-        q_seq = self.words_embeds(question)
+        q_seq = self.embed_with_val(question)
 
         fqs = self.fwdLSTM.initial_state().add_inputs(q_seq)
         bqs = self.bwdLSTM.initial_state().add_inputs(reversed(q_seq))
@@ -112,13 +150,15 @@ class Encoder(object):
 
         s = [dy.concatenate([x, y]) for x, y in zip(fqs[-1].s(), bqs[-1].s())]
 
+        option_embeds = []
         for option in options:
-            o_seq = self.words_embeds(option)
+            o_seq = self.embed_with_val(option)
             fos = fqs[-1].transduce(o_seq)
             bos = bqs[-1].transduce(reversed(o_seq))
             es.extend(dy.concatenate([f, b]) for f, b in zip(fos, reversed(bos)))
+            option_embeds.append(es[-1])
 
-        return es, s
+        return es, s, dy.concatenate(option_embeds)
 
 
 class Attender(object):
@@ -206,7 +246,7 @@ class Decoder(object):
         self.nid2num = {nid: num for num, nid in prior_nums.items()}
         self.num_embeds = Embedder(model, prior_nums, num_embed_dim)
         self.dummy_arg = model.add_parameters(num_embed_dim + sign_embed_dim)
-        self.dummy_arg_dim = num_embed_dim + sign_embed_dim
+        self.arg_dim = num_embed_dim + sign_embed_dim
 
         self.neg_embed = model.add_parameters(sign_embed_dim)
         self.pos_embed = model.add_parameters(sign_embed_dim)
@@ -222,14 +262,18 @@ class Decoder(object):
         self.input_att = Attender(model, hidden_dim + sign_embed_dim, encode_dim, att_dim)
         self.exprs_att = Attender(model, hidden_dim + sign_embed_dim, hidden_dim, att_dim)
 
+        num_copy_src = 6
+        num_options = 5
         self.h2op = Linear(model, hidden_dim, num_ops)
         self.h2ht = Linear(model, hidden_dim, hidden_dim)
-        self.h2copy = Linear(model, hidden_dim, 6)
+        self.h2copy = Linear(model, hidden_dim, num_copy_src)
+        self.ho2answer = Linear(model, hidden_dim + num_options * encode_dim, num_options)
 
         num_prior = len(prior_nums)
         self.sh2prior = Linear(model, hidden_dim + sign_embed_dim, num_prior)
 
-        self.opLSTM = dy.LSTMBuilder(num_layers, encode_dim + op_embed_dim + num_embed_dim + sign_embed_dim, hidden_dim, model)
+        expr_val_dim = 6
+        self.opLSTM = dy.LSTMBuilder(num_layers, encode_dim + expr_val_dim + op_embed_dim + self.arg_dim, hidden_dim, model)
 
     @classmethod
     def from_spec(cls, spec, model):
@@ -247,7 +291,7 @@ class Decoder(object):
     def disable_dropout(self):
         self.opLSTM.disable_dropout()
 
-    def __call__(self, es, e, input_num_indexes):
+    def __call__(self, es, e, option_embeds, input_num_indexes):
         assert isinstance(input_num_indexes, Iterable)
 
         _, cal_context, _ = self.decode_att(es)
@@ -286,7 +330,7 @@ class Decoder(object):
             if type(num) == float:
                 num = self.name2opid[num]
             if self.nid2num[num] == UNK:
-                return dy.scalarInput(0), dy.zeros(self.dummy_arg_dim)
+                return dy.scalarInput(0.0), dy.zeros(self.arg_dim)
             with parameters(self.neg_prior_embed, self.pos_prior_embed) as (neg_prior_embed, pos_prior_embed):
                 prior_ref = dy.concatenate([self.num_embeds[num], neg_prior_embed if neg else pos_prior_embed])
             return dy.pick(probs, num), prior_ref
@@ -299,7 +343,7 @@ class Decoder(object):
             assert type(selected_indexes) == set
             selected_indexes = [index for index, old_index in enumerate(input_num_indexes) if old_index in selected_indexes]
             if len(selected_indexes) == 0:
-                return dy.scalarInput(0), dy.zeros(self.dummy_arg_dim)
+                return dy.scalarInput(0.0), dy.zeros(self.arg_dim)
 
             signed_h = _signed_h(neg=neg)
             input_ref, probs = cal_input_context(signed_h, selected_indexes)
@@ -316,7 +360,7 @@ class Decoder(object):
             assert type(selected_indexes) == set
             selected_indexes = [index for index, old_index in enumerate(exprs_num_indexs) if old_index in selected_indexes]
             if len(selected_indexes) == 0:
-                return dy.scalarInput(0), dy.zeros(self.dummy_arg_dim)
+                return dy.scalarInput(0.0), dy.zeros(self.arg_dim)
 
             ht = dy.tanh(self.h2ht(s[0].output()))
             signed_h = _signed_h(ht, neg)
@@ -326,36 +370,77 @@ class Decoder(object):
             return dy.sum_elems(dy.select_rows(probs, selected_indexes)), exprs_ref
 
         with parameters(self.start_op, self.dummy_arg) as (start_op, dummy_arg):
-            def next_state(op, arg_ref=None):
+            def next_state(expr_val, op, arg_ref=None):
                 op_embed = self.op_embeds[op] if type(op) in (int, str) else op
                 arg_embed = dummy_arg if arg_ref is None else arg_ref
                 context, _ = cal_context(s[0].output())
-                s[0] = s[0].add_input(dy.concatenate([context, op_embed, arg_embed]))
+                #s[0] = s[0].add_input(dy.concatenate([context, dy.inputVector([float(expr_val)]), op_embed, arg_embed]))
+                s[0] = s[0].add_input(dy.concatenate([context, val_embed(expr_val), op_embed, arg_embed]))
                 if op in ('end', self.name2opid['end']):
                     append_expr(s[0].output())
                     exprs_num_indexs.append(step[0])
                 step[0] += 1
                 return s[0].output()
 
-            next_state(start_op)
+            next_state(0.0, start_op)
             step[0] = 0
 
+        def predict_answer():
+            h = s[0].output()
+            return dy.softmax(self.ho2answer(dy.concatenate([h, option_embeds])))
+
         return op_probs, op_prob, copy_probs, from_prior_probs, from_prior_prob, from_input_probs, \
-               from_input_prob, from_exprs_probs, from_exprs_prob, next_state
+               from_input_prob, from_exprs_probs, from_exprs_prob, next_state, predict_answer
 
 
-def find_num_positions(dataset):
+def add_expr_val(dataset):
+    @timeout(10, use_signals=False)
+    def process_trace(trace):
+        new_trace = []
+        interp = Interpreter()
+        for instruction in trace:
+            instruction = tuple(instruction)
+            op_name = instruction[0]
+            arg_num = None if len(instruction) < 2 else instruction[-1]
+            end_expr, expr_val = interp.next_op(op_name, arg_num)
+            if end_expr:
+                interp = Interpreter()
+            if expr_val is not None:
+                expr_val = float(expr_val)
+            new_trace.append(instruction[:1] + (expr_val,)+ instruction[1:])
+        return new_trace
+
     result = []
-    for question, options, trace in dataset:
-        input_num_indexes = set()
-        for index, token in enumerate(itertools.chain(*([question] + options))):
-            try:
-                if parse_expr(token).is_number:
-                    input_num_indexes.add(index)
-            except:
-                pass
-        result.append((question, options, trace, input_num_indexes))
+    for question, options, trace, input_num_indexes, answer in dataset:
+        try:
+            result.append((question, options, process_trace(trace), input_num_indexes, answer))
+        except:
+            pass
     return result
+
+
+def process_words(words):
+    words_with_val = []
+    for word in words:
+        val = None
+        try:
+            expr = parse_expr(word)
+            if expr.is_number:
+                val = float(expr)
+        except:
+            pass
+        words_with_val.append((word, val))
+    return words_with_val
+
+
+def add_num_val(dataset):
+    result = []
+    for question, options, trace, input_num_indexes, answer in dataset:
+        question = process_words(question)
+        options = [process_words(option) for option in options]
+        result.append((question, options, trace, input_num_indexes, answer))
+    return result
+
 
 
 def build_index(question, options):
@@ -372,15 +457,15 @@ def build_index(question, options):
 
 def solve(encoder, decoder, raw_question, raw_options, max_op_count):
     copy_id2src = ['pos_prior', 'neg_prior', 'pos_input', 'neg_input', 'pos_exprs', 'neg_exprs']
-    question = parse_question(raw_question)
-    options = [parse_question(raw_option) for raw_option in raw_options]
+    question = process_words(parse_question(raw_question))
+    options = [process_words(parse_question(raw_option)) for raw_option in raw_options]
     input_nums = build_index(question, options)
     input_nums_indexes = sorted(input_nums.keys())
     UNK_id = decoder.prior_nums[UNK]
     dy.renew_cg()
-    es, e = encoder(question, options)
-    op_probs, _, copy_probs, from_prior_probs, _, from_input_probs, _, from_exprs_probs, _, next_state \
-        = decoder(es, e, input_nums.keys())
+    es, e, option_embeds = encoder(question, options)
+    op_probs, _, copy_probs, from_prior_probs, _, from_input_probs, _, from_exprs_probs, _, next_state, predict_answer \
+        = decoder(es, e, option_embeds, input_nums.keys())
     interp = Interpreter()
     expr_vals = []
     ds = []
@@ -414,7 +499,6 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
                 assert False
             if neg:
                 arg_num *= -1
-        dh = next_state(op_name, arg_ref)
         end_expr, expr_val = interp.next_op(op_name, arg_num)
         if end_expr:
             ds.append(dh)
@@ -422,20 +506,24 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
             if op_name == 'exit':
                 break
             interp = Interpreter()
-    return expr_vals
+        dh = next_state(expr_val, op_name, arg_ref)
+    answer = predict_answer().npvalue().argmax()
+    return expr_vals, answer
 
 
-def cal_loss(encoder, decoder, question, options, input_num_indexes, trace):
-    es, e = encoder(question, options)
-    _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state \
-        = decoder(es, e, input_num_indexes)
+def cal_loss(encoder, decoder, question, options, input_num_indexes, trace, answer):
+    es, e, option_embeds = encoder(question, options)
+    _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state, predict_answer \
+        = decoder(es, e, option_embeds, input_num_indexes)
     problem_losses = []
     for instruction in trace:
         op_name = instruction[0]
+        expr_val = instruction[1]
         item_loss = -dy.log(op_prob(op_name))
-        if len(instruction) > 1:
-            _, pos_prior_nid, neg_prior_nid, pos_input_indexes, neg_input_indexes, pos_exprs_indexes, \
-            neg_exprs_indexes = instruction
+        arg_num = None
+        if len(instruction) > 2:
+            _, _, pos_prior_nid, neg_prior_nid, pos_input_indexes, neg_input_indexes, pos_exprs_indexes, \
+            neg_exprs_indexes, arg_num = instruction
             copy_p = copy_probs()
             from_pos_prior_p, pos_prior_ref = from_prior_prob(pos_prior_nid)
             from_neg_prior_p, neg_prior_ref = from_prior_prob(neg_prior_nid, True)
@@ -451,10 +539,12 @@ def cal_loss(encoder, decoder, question, options, input_num_indexes, trace):
             arg_ref = dy.concatenate_cols([pos_prior_ref, neg_prior_ref,
                                            pos_input_ref, neg_input_ref,
                                            pos_exprs_ref, neg_exprs_ref]) * copy_p
-            next_state(op_name, arg_ref)
-        else:
-            next_state(op_name)
         problem_losses.append(item_loss)
+        if op_name == 'exit':
+            break
+        next_state(expr_val, op_name, arg_ref)
+    answer_loss = dy.pick(predict_answer(), answer)
+    problem_losses.append(answer_loss)
     return dy.esum(problem_losses)
 
 
@@ -489,10 +579,19 @@ def main():
     with open(args.train_set, 'rb') as f:
         train_set = pickle.load(f)
 
-    if len(train_set) > 0 and len(train_set[0]) == 3:
-        train_set = find_num_positions(train_set)
+    if len(train_set) > 0 and len(train_set[0][2][0]) == 8:
+        print('add expr values...')
+        train_set = add_expr_val(train_set)
         with open(args.train_set, 'wb') as f:
             pickle.dump(train_set, f)
+
+    if len(train_set) > 0 and type(train_set[0][0][0]) == str:
+        print('add num values...')
+        train_set = add_num_val(train_set)
+        with open(args.train_set, 'wb') as f:
+            pickle.dump(train_set, f)
+
+    print('size of train_set:', len(train_set))
 
     random.seed(args.seed)
 
@@ -530,8 +629,8 @@ def main():
         batch_seq_length = 0
         num_batch = 0
         dy.renew_cg()
-        for i, (question, options, trace, input_num_indexes) in enumerate(train_set, 1):
-            problem_loss = cal_loss(encoder, decoder, question, options, input_num_indexes, trace)
+        for i, (question, options, trace, input_num_indexes, answer) in enumerate(train_set, 1):
+            problem_loss = cal_loss(encoder, decoder, question, options, input_num_indexes, trace, answer)
             batch_losses.append(problem_loss)
             batch_seq_length += len(trace)
             epoch_seq_length += len(trace)
@@ -553,6 +652,6 @@ def main():
         model.save('%s/epoch_%d.dmp' % (args.checkpoint_dir, num_epoch))
 
 
-# python stack_machine_model.py --dynet-seed 11747 --dynet-autobatch 1 --dynet-mem 11000 --dynet-gpu --batch_size 64 --dropout 0.7
+# python stack_machine_model.py --dynet-seed 11747 --dynet-autobatch 1 --dynet-mem 2000 --dynet-gpu --batch_size 64 --dropout 0.7
 if __name__ == "__main__":
     main()
