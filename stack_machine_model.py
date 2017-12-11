@@ -457,13 +457,13 @@ def build_index(question, options):
 
 def solve(encoder, decoder, raw_question, raw_options, max_op_count):
     copy_id2src = ['pos_prior', 'neg_prior', 'pos_input', 'neg_input', 'pos_exprs', 'neg_exprs']
-    question = process_words(parse_question(raw_question))
-    options = [process_words(parse_question(raw_option)) for raw_option in raw_options]
+    question = parse_question(raw_question)
+    options = [parse_question(raw_option) for raw_option in raw_options]
     input_nums = build_index(question, options)
     input_nums_indexes = sorted(input_nums.keys())
     UNK_id = decoder.prior_nums[UNK]
     dy.renew_cg()
-    es, e, option_embeds = encoder(question, options)
+    es, e, option_embeds = encoder(process_words(question), map(process_words, options))
     op_probs, _, copy_probs, from_prior_probs, _, from_input_probs, _, from_exprs_probs, _, next_state, predict_answer \
         = decoder(es, e, option_embeds, input_nums.keys())
     interp = Interpreter()
