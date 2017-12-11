@@ -158,7 +158,7 @@ class Encoder(object):
             es.extend(dy.concatenate([f, b]) for f, b in zip(fos, reversed(bos)))
             option_embeds.append(es[-1])
 
-        return es, s, dy.concatenate(option_embeds)
+        return es, s, option_embeds
 
 
 class Attender(object):
@@ -387,7 +387,7 @@ class Decoder(object):
 
         def predict_answer():
             h = s[0].output()
-            return dy.softmax(self.ho2answer(dy.concatenate([h, option_embeds])))
+            return dy.softmax(self.ho2answer(dy.concatenate([h] + option_embeds)))
 
         return op_probs, op_prob, copy_probs, from_prior_probs, from_prior_prob, from_input_probs, \
                from_input_prob, from_exprs_probs, from_exprs_prob, next_state, predict_answer
@@ -543,7 +543,7 @@ def cal_loss(encoder, decoder, question, options, input_num_indexes, trace, answ
         if op_name == 'exit':
             break
         next_state(expr_val, op_name, arg_ref)
-    answer_loss = dy.pick(predict_answer(), answer)
+    answer_loss = -dy.log(dy.pick(predict_answer(), answer))
     problem_losses.append(answer_loss)
     return dy.esum(problem_losses)
 
