@@ -103,6 +103,25 @@ class Linear(object):
             return dy.affine_transform([b, W, input_expr])
 
 
+class MLP(object):
+    def __init__(self, model, input_dim, hidden_dim, output_dim):
+        model = self.model = model.add_subcollection(self.__class__.__name__)
+        self.spec = input_dim, hidden_dim, output_dim
+        self.hidden = Linear(model, input_dim, hidden_dim)
+        self.output = Linear(model, hidden_dim, output_dim)
+
+    @classmethod
+    def from_spec(cls, spec, model):
+        input_dim, hidden_dim, output_dim = spec
+        return cls(model, input_dim, hidden_dim, output_dim)
+
+    def param_collection(self):
+        return self.model
+
+    def __call__(self, input_expr):
+        return self.output(dy.tanh(self.hidden(input_expr)))
+
+
 class Encoder(object):
     def __init__(self, model, word2wid, word_embed_dim, num_layers, hidden_dim):
         assert hidden_dim % 2 == 0, "BiLSTM hidden dimension must be even."
@@ -267,7 +286,7 @@ class Decoder(object):
         self.h2op = Linear(model, hidden_dim, num_ops)
         self.h2ht = Linear(model, hidden_dim, hidden_dim)
         self.h2copy = Linear(model, hidden_dim, num_copy_src)
-        self.ho2answer = Linear(model, hidden_dim + num_options * encode_dim, num_options)
+        self.ho2answer = MLP(model, hidden_dim + num_options * encode_dim, hidden_dim, num_options)
 
         num_prior = len(prior_nums)
         self.sh2prior = Linear(model, hidden_dim + sign_embed_dim, num_prior)
@@ -515,7 +534,7 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
 
 def cal_loss(encoder, decoder, question, options, input_num_indexes, trace, answer):
     option_orders = [0, 1, 2, 3, 4]
-    random.shuffle(option_order)
+    random.shuffle(option_orders)
     options = [options[index] for index in option_orders]
     answer = option_orders[answer]
     es, e, option_embeds = encoder(question, options)
