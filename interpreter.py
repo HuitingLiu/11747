@@ -20,10 +20,15 @@ class Interpreter:
         'binomial': binomial,
     }
 
-    def __init__(self):
-        self.stack = []
-        self.op_count = 0
-        self.valid_ops = self.plausible_ops(None)
+    def __init__(self, init_interp=None):
+        if init_interp == None:
+            self.stack = []
+            self.op_count = 0
+            self.valid_ops = self.plausible_ops(None)
+        else:
+            self.stack = init_interp.stack[:]
+            self.op_count = init_interp.op_count
+            self.valid_ops = set(init_interp.valid_ops)
 
     def load(self, x, stack=None):
         if stack is None:

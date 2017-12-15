@@ -8,9 +8,10 @@ import itertools
 import random
 import math
 import os
+import heapq
 
 from contextlib import contextmanager
-from collections import Iterable
+from collections import Iterable, defaultdict
 from itertools import chain
 from sympy.parsing.sympy_parser import parse_expr
 from interpreter import Interpreter
@@ -23,7 +24,13 @@ UNK = ('<UNK>',)
 
 @contextmanager
 def parameters(*params):
-    yield tuple(map(lambda x: dy.parameter(x), params))
+    result = tuple(map(lambda x: dy.parameter(x), params))
+    if len(result) == 0:
+        yield None
+    elif len(result) == 1:
+        yield result[0]
+    else:
+        yield result
 
 
 def decompose(x):
@@ -182,47 +189,53 @@ class Attender(object):
         with parameters(self.P, self.W, self.b) as (P, W, b):
             if es:
                 assert len(es) > 0
-                es_matrix = dy.concatenate_cols(es)
-                ps_matrix = P * es_matrix
 
-                def cal_scores(s):
-                    hs_matrix = dy.tanh(dy.colwise_add(ps_matrix, W * s))
-                    return dy.softmax(dy.transpose(b * hs_matrix))
+                class ImmutableState(object):
+                    def __init__(self):
+                        self.es_matrix = dy.concatenate_cols(es)
+                        self.ps_matrix = P * self.es_matrix
 
-                def cal_context(s, selected=None):
-                    ws = cal_scores(s)
-                    if selected is None:
-                        return es_matrix * ws, ws
-                    selected_ws = dy.select_rows(ws, selected)
-                    selected_ws = dy.cdiv(selected_ws, dy.sum_elems(selected_ws))
-                    return dy.concatenate_cols([es[index] for index in selected]) * selected_ws, ws
+                    def cal_scores(self, s):
+                        hs_matrix = dy.tanh(dy.colwise_add(self.ps_matrix, W * s))
+                        return dy.softmax(dy.transpose(b * hs_matrix))
 
-                return cal_scores, cal_context, None
+                    def cal_context(self, s, selected=None):
+                        ws = self.cal_scores(s)
+                        if selected is None:
+                            return self.es_matrix * ws, ws
+                        selected_ws = dy.select_rows(ws, selected)
+                        selected_ws = dy.cdiv(selected_ws, dy.sum_elems(selected_ws))
+                        return dy.concatenate_cols([es[index] for index in selected]) * selected_ws, ws
+
+                return ImmutableState()
+
             else:
-                es = []
-                ps = []
 
-                def append_e(e):
-                    es.append(e)
-                    ps.append(P * e)
+                class MutableSate(object):
+                    def __init__(self, es, ps):
+                        self.es = es
+                        self.ps = ps
 
-                def cal_scores(s):
-                    if len(ps) == 0:
-                        return None
-                    hs_matrix = dy.tanh(dy.colwise_add(dy.concatenate_cols(ps), W * s))
-                    return dy.softmax(dy.transpose(b * hs_matrix))
+                    def append_e(self, e):
+                        return MutableSate(self.es + [e], self.ps + [P * e])
 
-                def cal_context(s, selected=None):
-                    ws = cal_scores(s)
-                    if ws is None:
-                        return None, None
-                    if selected is None:
-                        return dy.concatenate_cols(es) * ws, ws
-                    selected_ws = dy.select_rows(ws, selected)
-                    selected_ws = dy.cdiv(selected_ws, dy.sum_elems(selected_ws))
-                    return dy.concatenate_cols([es[index] for index in selected]) * selected_ws, ws
+                    def cal_scores(self, s):
+                        if len(self.ps) == 0:
+                            return None
+                        hs_matrix = dy.tanh(dy.colwise_add(dy.concatenate_cols(self.ps), W * s))
+                        return dy.softmax(dy.transpose(b * hs_matrix))
 
-                return cal_scores, cal_context, append_e
+                    def cal_context(self, s, selected=None):
+                        ws = self.cal_scores(s)
+                        if ws is None:
+                            return None, None
+                        if selected is None:
+                            return dy.concatenate_cols(self.es) * ws, ws
+                        selected_ws = dy.select_rows(ws, selected)
+                        selected_ws = dy.cdiv(selected_ws, dy.sum_elems(selected_ws))
+                        return dy.concatenate_cols([self.es[index] for index in selected]) * selected_ws, ws
+
+                return MutableSate([], [])
 
 
 class Decoder(object):
@@ -264,7 +277,6 @@ class Decoder(object):
         self.option_att = Attender(model, hidden_dim, encode_dim, att_dim)
 
         num_copy_src = 6
-        num_options = 5
         self.h2op = Linear(model, hidden_dim, num_ops)
         self.h2ht = Linear(model, hidden_dim, hidden_dim)
         self.h2copy = Linear(model, hidden_dim, num_copy_src)
@@ -293,105 +305,100 @@ class Decoder(object):
 
     def __call__(self, es, e, option_embeds, input_num_indexes):
         assert isinstance(input_num_indexes, Iterable)
-
-        _, cal_context, _ = self.decode_att(es)
+        decoder = self
+        context_atts = decoder.decode_att(es)
         input_num_indexes = sorted(set(input_num_indexes))
-        cal_input_scores, cal_input_context, _ = self.input_att([es[index] for index in input_num_indexes])
-        cal_option_scores, _, _ = self.option_att(option_embeds)
-        exprs_num_indexs = []
-        cal_exprs_scores, cal_exprs_context, append_expr = self.exprs_att()
-        s = [self.opLSTM.initial_state().set_s(e)]
-        step = [-1]
+        input_atts = decoder.input_att([es[index] for index in input_num_indexes])
+        option_atts = decoder.option_att(option_embeds)
 
-        def op_probs():
-            h = s[0].output()
-            return dy.softmax(self.h2op(h))
+        class State(object):
+            def __init__(self, s, step, exprs_num_indexs, expr_atts):
+                self.s = s
+                self.step = step
+                self.exprs_num_indexs = exprs_num_indexs
+                self.expr_atts = expr_atts
 
-        def op_prob(op):
-            probs = op_probs()
-            if type(op) == str:
-                op = self.name2opid[op]
-            return dy.pick(probs, op)
+            def op_probs(self):
+                h = self.s.output()
+                return dy.softmax(decoder.h2op(h))
 
-        def copy_probs():
-            h = s[0].output()
-            return dy.softmax(self.h2copy(h))
+            def op_prob(self, op):
+                probs = self.op_probs()
+                if type(op) == str:
+                    op = decoder.name2opid[op]
+                return dy.pick(probs, op)
 
-        def _signed_h(h=None, neg=False):
-            with parameters(self.neg_embed, self.pos_embed) as (neg_embed, pos_embed):
-                signed_h = dy.concatenate([h if h is not None else s[0].output(), neg_embed if neg else pos_embed])
+            def copy_probs(self):
+                h = self.s.output()
+                return dy.softmax(decoder.h2copy(h))
+
+            def _signed_h(self, h=None, neg=False):
+                with parameters(decoder.neg_embed, decoder.pos_embed) as (neg_embed, pos_embed):
+                    signed_h = dy.concatenate([h if h is not None else self.s.output(), neg_embed if neg else pos_embed])
                 return signed_h
 
-        def from_prior_probs(neg=False):
-            signed_h = _signed_h(neg=neg)
-            return dy.softmax(self.sh2prior(signed_h))
+            def from_prior_probs(self, neg=False):
+                signed_h = self._signed_h(neg=neg)
+                return dy.softmax(decoder.sh2prior(signed_h))
 
-        def from_prior_prob(num, neg=False):
-            probs = from_prior_probs(neg)
-            if type(num) == float:
-                num = self.name2opid[num]
-            if self.nid2num[num] == UNK:
-                return dy.scalarInput(0.0), dy.zeros(self.arg_dim)
-            with parameters(self.neg_prior_embed, self.pos_prior_embed) as (neg_prior_embed, pos_prior_embed):
-                prior_ref = dy.concatenate([self.num_embeds[num], neg_prior_embed if neg else pos_prior_embed])
-            return dy.pick(probs, num), prior_ref
+            def from_prior_prob(self, num, neg=False):
+                probs = self.from_prior_probs(neg)
+                if type(num) == float:
+                    num = decoder.prior_nums[num if num in decoder.prior_nums else UNK]
+                if decoder.nid2num[num] == UNK:
+                    return dy.scalarInput(0.0), dy.zeros(decoder.arg_dim)
+                with parameters(decoder.neg_prior_embed, decoder.pos_prior_embed) as (neg_prior_embed, pos_prior_embed):
+                    prior_ref = dy.concatenate([decoder.num_embeds[num], neg_prior_embed if neg else pos_prior_embed])
+                return dy.pick(probs, num), prior_ref
 
-        def from_input_probs(neg=False):
-            signed_h = _signed_h(neg=neg)
-            return cal_input_scores(signed_h)
+            def from_input_probs(self, neg=False):
+                signed_h = self._signed_h(neg=neg)
+                return input_atts.cal_scores(signed_h)
 
-        def from_input_prob(selected_indexes, neg=False):
-            assert type(selected_indexes) == set
-            selected_indexes = [index for index, old_index in enumerate(input_num_indexes) if old_index in selected_indexes]
-            if len(selected_indexes) == 0:
-                return dy.scalarInput(0.0), dy.zeros(self.arg_dim)
+            def from_input_prob(self, selected_indexes, neg=False):
+                assert type(selected_indexes) == set
+                selected_indexes = [index for index, old_index in enumerate(input_num_indexes) if old_index in selected_indexes]
+                if len(selected_indexes) == 0:
+                    return dy.scalarInput(0.0), dy.zeros(decoder.arg_dim)
+                signed_h = self._signed_h(neg=neg)
+                input_ref, probs = input_atts.cal_context(signed_h, selected_indexes)
+                with parameters(decoder.neg_input_embed, decoder.pos_input_embed) as (neg_input_embed, pos_input_embed):
+                    input_ref = dy.concatenate([input_ref, neg_input_embed if neg else pos_input_embed])
+                return dy.sum_elems(dy.select_rows(probs, selected_indexes)), input_ref
 
-            signed_h = _signed_h(neg=neg)
-            input_ref, probs = cal_input_context(signed_h, selected_indexes)
-            with parameters(self.neg_input_embed, self.pos_input_embed) as (neg_input_embed, pos_input_embed):
-                input_ref = dy.concatenate([input_ref, neg_input_embed if neg else pos_input_embed])
-            return dy.sum_elems(dy.select_rows(probs, selected_indexes)), input_ref
+            def from_exprs_probs(self, neg=False):
+                ht = dy.tanh(decoder.h2ht(self.s.output()))
+                signed_h = self._signed_h(ht, neg)
+                return self.expr_atts.cal_scores(signed_h)
 
-        def from_exprs_probs(neg=False):
-            ht = dy.tanh(self.h2ht(s[0].output()))
-            signed_h = _signed_h(ht, neg)
-            return cal_exprs_scores(signed_h)
+            def from_exprs_prob(self, selected_indexes, neg=False):
+                assert type(selected_indexes) == set
+                selected_indexes = [index for index, old_index in enumerate(self.exprs_num_indexs) if old_index in selected_indexes]
+                if len(selected_indexes) == 0:
+                    return dy.scalarInput(0.0), dy.zeros(decoder.arg_dim)
+                ht = dy.tanh(decoder.h2ht(self.s.output()))
+                signed_h = self._signed_h(ht, neg)
+                exprs_ref, probs = self.expr_atts.cal_context(signed_h, selected_indexes)
+                with parameters(decoder.neg_exprs_embed, decoder.pos_exprs_embed) as (neg_exprs_embed, pos_exprs_embed):
+                    exprs_ref = dy.concatenate([exprs_ref, neg_exprs_embed if neg else pos_exprs_embed])
+                return dy.sum_elems(dy.select_rows(probs, selected_indexes)), exprs_ref
 
-        def from_exprs_prob(selected_indexes, neg=False):
-            assert type(selected_indexes) == set
-            selected_indexes = [index for index, old_index in enumerate(exprs_num_indexs) if old_index in selected_indexes]
-            if len(selected_indexes) == 0:
-                return dy.scalarInput(0.0), dy.zeros(self.arg_dim)
+            def next_state(self, expr_val, op, arg_ref=None):
+                op_embed = decoder.op_embeds[op] if type(op) in (int, str) else op
+                with parameters(decoder.dummy_arg) as dummy_arg:
+                    arg_embed = dummy_arg if arg_ref is None else arg_ref
+                context, _ = context_atts.cal_context(self.s.output())
+                next_s = self.s.add_input(dy.concatenate([context, val_embed(expr_val), op_embed, arg_embed]))
+                if op in ('end', decoder.name2opid['end']):
+                    return State(next_s, self.step + 1, self.exprs_num_indexs + [self.step], self.expr_atts.append_e(next_s.output()))
+                return State(next_s, self.step + 1, self.exprs_num_indexs, self.expr_atts)
 
-            ht = dy.tanh(self.h2ht(s[0].output()))
-            signed_h = _signed_h(ht, neg)
-            exprs_ref, probs = cal_exprs_context(signed_h, selected_indexes)
-            with parameters(self.neg_exprs_embed, self.pos_exprs_embed) as (neg_exprs_embed, pos_exprs_embed):
-                exprs_ref = dy.concatenate([exprs_ref, neg_exprs_embed if neg else pos_exprs_embed])
-            return dy.sum_elems(dy.select_rows(probs, selected_indexes)), exprs_ref
+            def predict_answer(self):
+                h = self.s.output()
+                return option_atts.cal_scores(h)
 
-        with parameters(self.start_op, self.dummy_arg) as (start_op, dummy_arg):
-            def next_state(expr_val, op, arg_ref=None):
-                op_embed = self.op_embeds[op] if type(op) in (int, str) else op
-                arg_embed = dummy_arg if arg_ref is None else arg_ref
-                context, _ = cal_context(s[0].output())
-                #s[0] = s[0].add_input(dy.concatenate([context, dy.inputVector([float(expr_val)]), op_embed, arg_embed]))
-                s[0] = s[0].add_input(dy.concatenate([context, val_embed(expr_val), op_embed, arg_embed]))
-                if op in ('end', self.name2opid['end']):
-                    append_expr(s[0].output())
-                    exprs_num_indexs.append(step[0])
-                step[0] += 1
-                return s[0].output()
-
-            next_state(0.0, start_op)
-            step[0] = 0
-
-        def predict_answer():
-            h = s[0].output()
-            return cal_option_scores(h)
-
-        return op_probs, op_prob, copy_probs, from_prior_probs, from_prior_prob, from_input_probs, \
-               from_input_prob, from_exprs_probs, from_exprs_prob, next_state, predict_answer
+        with parameters(decoder.start_op) as start_op:
+            return State(decoder.opLSTM.initial_state().set_s(e), -1, [], decoder.exprs_att()).next_state(0.0, start_op)
 
 
 def add_expr_val(dataset):
@@ -465,35 +472,34 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
     UNK_id = decoder.prior_nums[UNK]
     dy.renew_cg()
     es, e, option_embeds = encoder(process_words(question), map(process_words, options))
-    op_probs, _, copy_probs, from_prior_probs, _, from_input_probs, _, from_exprs_probs, _, next_state, predict_answer \
-        = decoder(es, e, option_embeds, input_nums.keys())
+    state = decoder(es, e, option_embeds, input_nums.keys())
     interp = Interpreter()
     expr_vals = []
     ds = []
     trace = []
     for _ in range(max_op_count):
-        p_op = op_probs().npvalue()
+        p_op = state.op_probs().npvalue()
         p_op[[op_name not in interp.valid_ops for op_id, op_name in decoder.opid2name.items()]] = -np.inf
         op_name = decoder.opid2name[p_op.argmax()]
         arg_num = None
         arg_ref = None
         if op_name == 'load':
-            copy_src = copy_id2src[copy_probs().npvalue().argmax()]
+            copy_src = copy_id2src[state.copy_probs().npvalue().argmax()]
             neg = copy_src.startswith('neg')
             if copy_src.endswith('_input'):
-                num_index = input_nums_indexes[from_input_probs(neg=neg).npvalue().argmax()]
+                num_index = input_nums_indexes[state.from_input_probs(neg=neg).npvalue().argmax()]
                 arg_num = input_nums[num_index]
                 with parameters(decoder.neg_input_embed, decoder.pos_input_embed) as (neg_input_embed, pos_input_embed):
                     arg_ref = dy.concatenate([es[num_index], neg_input_embed if neg else pos_input_embed])
             elif copy_src.endswith('_prior'):
-                p_prior = from_prior_probs(neg=neg).npvalue()
+                p_prior = state.from_prior_probs(neg=neg).npvalue()
                 p_prior[UNK_id] = -np.inf
                 nid = p_prior.argmax()
                 arg_num = decoder.nid2num[nid]
                 with parameters(decoder.neg_prior_embed, decoder.pos_prior_embed) as (neg_prior_embed, pos_prior_embed):
                     arg_ref = dy.concatenate([decoder.num_embeds[nid], neg_prior_embed if neg else pos_prior_embed])
             elif copy_src.endswith('_exprs'):
-                expr_index = from_exprs_probs(neg=neg).npvalue().argmax()
+                expr_index = state.from_exprs_probs(neg=neg).npvalue().argmax()
                 arg_num = expr_vals[expr_index]
                 with parameters(decoder.neg_exprs_embed, decoder.pos_exprs_embed) as (neg_exprs_embed, pos_exprs_embed):
                     arg_ref = dy.concatenate([ds[expr_index], neg_exprs_embed if neg else pos_exprs_embed])
@@ -504,36 +510,202 @@ def solve(encoder, decoder, raw_question, raw_options, max_op_count):
         end_expr, expr_val = interp.next_op(op_name, arg_num)
         trace.append((op_name, arg_num))
         if end_expr:
-            ds.append(dh)
+            ds.append(state.s.output())
             expr_vals.append(expr_val)
             if op_name == 'exit':
                 break
             interp = Interpreter()
-        dh = next_state(expr_val, op_name, arg_ref)
-    answer = predict_answer().npvalue().argmax()
+        state = state.next_state(expr_val, op_name, arg_ref)
+    answer = state.predict_answer().npvalue().argmax()
     return trace, expr_vals, answer
+
+
+def solve2(encoder, decoder, raw_question, raw_options, max_op_count):
+    question = parse_question(raw_question)
+    options = [parse_question(raw_option) for raw_option in raw_options]
+    input_nums = build_index(question, options)
+    input_nums_pos = defaultdict(set)
+    for index, num in input_nums.items():
+        input_nums_pos[num].add(index)
+    expr_nums_pos = defaultdict(set)
+    num_candidates = set(input_nums_pos.keys()) | set(decoder.prior_nums.keys())
+    num_candidates.remove(UNK)
+    num_candidates |= {-num for num in num_candidates}
+    num_candidates = {float(num) for num in num_candidates}
+    dy.renew_cg()
+    es, e, option_embeds = encoder(process_words(question), map(process_words, options))
+    state = decoder(es, e, option_embeds, input_nums.keys())
+    interp = Interpreter()
+    expr_vals = []
+    ds = []
+    trace = []
+    for _ in range(max_op_count):
+        p_op = dy.log(state.op_probs()).npvalue()
+        p_op[[op_name not in interp.valid_ops for op_id, op_name in decoder.opid2name.items()]] = -np.inf
+        op_name = decoder.opid2name[p_op.argmax()]
+        max_arg_num = None
+        max_arg_ref = None
+        max_instruct_p = None
+        if op_name == 'load':
+            load_p = p_op[decoder.name2opid['load']]
+            copy_p = state.copy_probs()
+            for arg_num in num_candidates:
+                from_pos_prior_p, pos_prior_ref = state.from_prior_prob(arg_num)
+                from_neg_prior_p, neg_prior_ref = state.from_prior_prob(-arg_num, True)
+                from_pos_input_p, pos_input_ref = state.from_input_prob(input_nums_pos[arg_num])
+                from_neg_input_p, neg_input_ref = state.from_input_prob(input_nums_pos[-arg_num], True)
+                from_pos_exprs_p, pos_exprs_ref = state.from_exprs_prob(expr_nums_pos[arg_num])
+                from_neg_exprs_p, neg_exprs_ref = state.from_exprs_prob(expr_nums_pos[-arg_num], True)
+
+                from_p = dy.concatenate([from_pos_prior_p, from_neg_prior_p,
+                                         from_pos_input_p, from_neg_input_p,
+                                         from_pos_exprs_p, from_neg_exprs_p])
+                arg_ref = (dy.concatenate_cols([pos_prior_ref, neg_prior_ref,
+                                               pos_input_ref, neg_input_ref,
+                                               pos_exprs_ref, neg_exprs_ref]) * copy_p)
+                instruct_p = load_p + dy.log(dy.dot_product(copy_p, from_p)).value()
+                if max_instruct_p is None or max_instruct_p < instruct_p:
+                    max_arg_num = arg_num
+                    max_arg_ref = arg_ref
+                    max_instruct_p = instruct_p
+        end_expr, expr_val = interp.next_op(op_name, max_arg_num)
+        trace.append((op_name, max_arg_num))
+        if end_expr:
+            if op_name == 'exit':
+                break
+            ds.append(state.s.output())
+            expr_val = float(expr_val)
+            expr_nums_pos[expr_val].add(state.step)
+            num_candidates.add(expr_val)
+            num_candidates.add(-expr_val)
+            expr_vals.append(expr_val)
+            interp = Interpreter()
+        state = state.next_state(expr_val, op_name, max_arg_ref)
+    answer = state.predict_answer().npvalue().argmax()
+    return trace, expr_vals, answer
+
+
+def solve3(encoder, decoder, raw_question, raw_options, max_op_count, k, max_only=False):
+    question = parse_question(raw_question)
+    options = [parse_question(raw_option) for raw_option in raw_options]
+    input_nums = build_index(question, options)
+    input_nums_pos = defaultdict(set)
+    for index, num in input_nums.items():
+        input_nums_pos[num].add(index)
+    num_candidates = set(input_nums_pos.keys()) | set(decoder.prior_nums.keys())
+    num_candidates.remove(UNK)
+    num_candidates |= {-num for num in num_candidates}
+    num_candidates = {float(num) for num in num_candidates}
+    dy.renew_cg()
+    es, e, option_embeds = encoder(process_words(question), map(process_words, options))
+    state = decoder(es, e, option_embeds, input_nums.keys())
+    interp = Interpreter()
+
+    def get_all_next(total_p, _, state, interp, last_op_name, last_arg_ref, last_arg_num, num_candidates, expr_nums_pos, expr_vals, trace):
+        if last_op_name == 'exit':
+            return
+        if last_op_name is not None:
+            trace = trace + [(last_op_name, last_arg_num)]
+            interp = Interpreter(interp)
+            end_expr, expr_val = interp.next_op(last_op_name, last_arg_num)
+            if end_expr:
+                try:
+                    expr_val = float(expr_val)
+                except:
+                    return
+                expr_nums_pos = defaultdict(set, expr_nums_pos)
+                expr_nums_pos[expr_val].add(state.step)
+                num_candidates = num_candidates | {expr_val, -expr_val}
+                expr_vals = expr_vals + [expr_val]
+                interp = Interpreter()
+            state = state.next_state(expr_val, last_op_name, last_arg_ref)
+        p_op = dy.log(state.op_probs()).npvalue()
+        for op_id, op_name in decoder.opid2name.items():
+            if op_name not in interp.valid_ops:
+                continue
+            op_p = p_op[op_id]
+            if op_name == 'load':
+                copy_p = state.copy_probs()
+                for arg_num in num_candidates:
+                    from_pos_prior_p, pos_prior_ref = state.from_prior_prob(arg_num)
+                    from_neg_prior_p, neg_prior_ref = state.from_prior_prob(-arg_num, True)
+                    from_pos_input_p, pos_input_ref = state.from_input_prob(input_nums_pos[arg_num])
+                    from_neg_input_p, neg_input_ref = state.from_input_prob(input_nums_pos[-arg_num], True)
+                    from_pos_exprs_p, pos_exprs_ref = state.from_exprs_prob(expr_nums_pos[arg_num])
+                    from_neg_exprs_p, neg_exprs_ref = state.from_exprs_prob(expr_nums_pos[-arg_num], True)
+
+                    from_p = dy.concatenate([from_pos_prior_p, from_neg_prior_p,
+                                             from_pos_input_p, from_neg_input_p,
+                                             from_pos_exprs_p, from_neg_exprs_p])
+                    arg_ref = (dy.concatenate_cols([pos_prior_ref, neg_prior_ref,
+                                                   pos_input_ref, neg_input_ref,
+                                                   pos_exprs_ref, neg_exprs_ref]) * copy_p)
+                    instruct_p = (op_p + dy.log(dy.dot_product(copy_p, from_p))).value()
+                    if not math.isinf(instruct_p):
+                        yield total_p + instruct_p, np.random.uniform(), state, interp, op_name, arg_ref, arg_num, num_candidates, expr_nums_pos, expr_vals, trace
+            else:
+                instruct_p = op_p
+                yield total_p + instruct_p, np.random.uniform(), state, interp, op_name, None, None, num_candidates, expr_nums_pos, expr_vals, trace
+
+    top_n = [[0.0, np.random.uniform(), state, interp, None, None, None, num_candidates, defaultdict(set), [], []]]
+    final_c = []
+    while len(final_c) < k:
+        next_top_n = []
+        for c in top_n:
+            for next_c in get_all_next(*c):
+                if next_c[4] == 'exit':
+                    if len(final_c) < k:
+                        heapq.heappush(final_c, next_c)
+                    else:
+                        heapq.heappushpop(final_c, next_c)
+                    continue
+                if len(next_c[-1]) > max_op_count:
+                    continue
+                if len(next_top_n) < k:
+                    try:
+                        heapq.heappush(next_top_n, next_c)
+                    except:
+                        print(next_top_n, next_c)
+                        raise
+                else:
+                    try:
+                        heapq.heappushpop(next_top_n, next_c)
+                    except:
+                        print(next_top_n, next_c)
+                        raise
+        top_n = next_top_n
+
+    if max_only:
+        final_p = max(final_c)[2].predict_answer().npvalue()
+    else:
+        final_p = None
+        for c in final_c:
+            if final_p is None:
+                final_p = (c[0] + dy.log(c[2].predict_answer())).npvalue()
+            else:
+                final_p = np.logaddexp(final_p, (c[0] + dy.log(c[2].predict_answer())).npvalue())
+    return final_p.argmax()
 
 
 def cal_loss(encoder, decoder, question, options, input_num_indexes, trace, answer):
     es, e, option_embeds = encoder(question, options)
-    _, op_prob, copy_probs, _, from_prior_prob, _, from_input_prob, _, from_exprs_prob, next_state, predict_answer \
-        = decoder(es, e, option_embeds, input_num_indexes)
+    state = decoder(es, e, option_embeds, input_num_indexes)
     problem_losses = []
     for instruction in trace:
         op_name = instruction[0]
         expr_val = instruction[1]
-        item_loss = -dy.log(op_prob(op_name))
+        item_loss = -dy.log(state.op_prob(op_name))
         arg_num = None
         if len(instruction) > 2:
             _, _, pos_prior_nid, neg_prior_nid, pos_input_indexes, neg_input_indexes, pos_exprs_indexes, \
             neg_exprs_indexes, arg_num = instruction
-            copy_p = copy_probs()
-            from_pos_prior_p, pos_prior_ref = from_prior_prob(pos_prior_nid)
-            from_neg_prior_p, neg_prior_ref = from_prior_prob(neg_prior_nid, True)
-            from_pos_input_p, pos_input_ref = from_input_prob(set(pos_input_indexes))
-            from_neg_input_p, neg_input_ref = from_input_prob(set(neg_input_indexes), True)
-            from_pos_exprs_p, pos_exprs_ref = from_exprs_prob(set(pos_exprs_indexes))
-            from_neg_exprs_p, neg_exprs_ref = from_exprs_prob(set(neg_exprs_indexes), True)
+            copy_p = state.copy_probs()
+            from_pos_prior_p, pos_prior_ref = state.from_prior_prob(pos_prior_nid)
+            from_neg_prior_p, neg_prior_ref = state.from_prior_prob(neg_prior_nid, True)
+            from_pos_input_p, pos_input_ref = state.from_input_prob(set(pos_input_indexes))
+            from_neg_input_p, neg_input_ref = state.from_input_prob(set(neg_input_indexes), True)
+            from_pos_exprs_p, pos_exprs_ref = state.from_exprs_prob(set(pos_exprs_indexes))
+            from_neg_exprs_p, neg_exprs_ref = state.from_exprs_prob(set(neg_exprs_indexes), True)
 
             from_p = dy.concatenate([from_pos_prior_p, from_neg_prior_p,
                                      from_pos_input_p, from_neg_input_p,
@@ -545,8 +717,8 @@ def cal_loss(encoder, decoder, question, options, input_num_indexes, trace, answ
         problem_losses.append(item_loss)
         if op_name == 'exit':
             break
-        next_state(expr_val, op_name, arg_ref)
-    answer_loss = -dy.log(dy.pick(predict_answer(), answer))
+        state = state.next_state(expr_val, op_name, arg_ref)
+    answer_loss = -dy.log(dy.pick(state.predict_answer(), answer))
     problem_losses.append(answer_loss)
     return dy.esum(problem_losses)
 
